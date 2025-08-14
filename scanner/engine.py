@@ -1,12 +1,15 @@
 import pkgutil
 import importlib
-from typing import List, Dict, Callable, Optional, Type, Iterable
+from typing import List, Dict, Callable, Optional, Type, Iterable, Set, Tuple
 from threading import Event
 from .vulnerability import Finding
 from crawler import PageData
 from http_client import HTTPClient
 from config import CONFIG
-from .checks.base_check import BaseCheck
+try:
+    from .checks.base_check import BaseCheck
+except Exception:  # fallback for some analyzers
+    from scanner.checks.base_check import BaseCheck  # type: ignore
 
 class VulnerabilityScanner:
     def __init__(self, http_client: HTTPClient, status_cb: Optional[Callable[[str], None]] = None, progress_cb: Optional[Callable[[float], None]] = None, stop_event: Optional[Event] = None, enabled_checks: Optional[Iterable[str]] = None):
@@ -17,6 +20,7 @@ class VulnerabilityScanner:
         self.findings: List[Finding] = []
         self.check_classes: List[Type[BaseCheck]] = []
         self.enabled_checks = {c.lower() for c in enabled_checks} if enabled_checks else None
+        self.dedup_keys: Set[Tuple[str, str, str]] = set()
         self._discover_checks()
 
     def _discover_checks(self):
@@ -51,7 +55,12 @@ class VulnerabilityScanner:
                 try:
                     new_findings = check.scan(self.http, page, status_cb=self.status_cb, config=CONFIG)
                     if new_findings:
-                        self.findings.extend(new_findings)
+                        for f in new_findings:
+                            key = (f.issue, f.location, f.evidence)
+                            if key in self.dedup_keys:
+                                continue
+                            self.dedup_keys.add(key)
+                            self.findings.append(f)
                 except Exception as e:
                     self.status_cb(f"Check {check.name} failed on {url}: {e}")
             processed += 1

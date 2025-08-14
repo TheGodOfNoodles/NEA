@@ -46,5 +46,35 @@ class HeaderCheck(BaseCheck):
                 risk="Lack of CSP increases risk of XSS and data injection.",
                 category="Security Headers"
             ))
+        hsts = headers.get('strict-transport-security')
+        if page.url.startswith('https://') and not hsts:
+            findings.append(Finding(
+                issue="Missing Strict-Transport-Security",
+                severity="Medium",
+                location=page.url,
+                evidence=str(hsts),
+                risk="Without HSTS users could be downgraded to HTTP (MITM risk).",
+                category="Security Headers"
+            ))
+        refpol = headers.get('referrer-policy')
+        if not refpol:
+            findings.append(Finding(
+                issue="Missing Referrer-Policy",
+                severity="Low",
+                location=page.url,
+                evidence=str(refpol),
+                risk="Referrers may leak sensitive path/query data to third-party sites.",
+                category="Security Headers"
+            ))
+        perm_pol = headers.get('permissions-policy') or headers.get('feature-policy')
+        if not perm_pol:
+            findings.append(Finding(
+                issue="Missing Permissions-Policy",
+                severity="Low",
+                location=page.url,
+                evidence=str(perm_pol),
+                risk="Browser features not restricted (e.g., camera, geolocation).",
+                category="Security Headers"
+            ))
         return findings
 

@@ -22,6 +22,7 @@ class PageData:
     forms: List[FormInfo] = field(default_factory=list)
     headers: Dict[str, str] = field(default_factory=dict)
     body: str = ''
+    raw_set_cookies: List[str] = field(default_factory=list)
 
 class Crawler:
     def __init__(self, base_url: str, max_depth: int, http_client: HTTPClient,
@@ -67,6 +68,15 @@ class Crawler:
                 headers = {k.lower(): v for k, v in resp.headers.items()} if resp else {}
                 content_type = headers.get('content-type', '')
                 page_data = PageData(url=current, headers=headers)
+                if resp:
+                    # attempt to capture all Set-Cookie headers
+                    try:
+                        raw = resp.raw.headers.get_all('Set-Cookie') or []  # type: ignore[attr-defined]
+                    except Exception:
+                        raw = []
+                    if 'set-cookie' in headers and not raw:
+                        raw = [headers['set-cookie']]
+                    page_data.raw_set_cookies = raw
                 if resp and 'text/html' in content_type:
                     page_data.body = resp.text
                     soup = BeautifulSoup(resp.text, 'html.parser')

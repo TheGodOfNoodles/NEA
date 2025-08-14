@@ -1,8 +1,8 @@
-from typing import List, Optional, Callable, Dict
+from typing import List, Optional, Callable
 from urllib.parse import urlparse, parse_qs, urlencode
 from scanner.vulnerability import Finding
 from .base_check import BaseCheck
-from crawler import PageData, FormInfo, FormField
+from crawler import PageData
 from http_client import HTTPClient
 
 BOOLEAN_DIFF_THRESHOLD = 50

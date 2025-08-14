@@ -1,6 +1,7 @@
 import threading
 import queue
 import traceback
+import webbrowser
 from typing import List, Dict
 
 try:
@@ -35,6 +36,7 @@ class SecurityScanApp:
         self.findings: List[Finding] = []
         self.pages: Dict[str, PageData] = {}
         self.stop_event = threading.Event()
+        self.http_client = None
         self.root.after(200, self._poll_status)
 
     # ---------------- UI Construction ----------------
@@ -75,7 +77,31 @@ class SecurityScanApp:
         self.lbl_status = ctk.CTkLabel(frm, textvariable=self.status_var, anchor='w') if USING_CUSTOM else ctk.Label(frm, textvariable=self.status_var, anchor='w')
         self.lbl_status.grid(row=4, column=0, columnspan=4, sticky='we')
 
-        # Results Treeview
+        # Insert filter row (row 5)
+        self.search_var = ctk.StringVar(value='')
+        self.sev_filter_var = ctk.StringVar(value='All')
+        self.export_format_var = ctk.StringVar(value='text')
+        lbl_search = ctk.Label(frm, text='Search:') if not USING_CUSTOM else ctk.CTkLabel(frm, text='Search:')
+        lbl_search.grid(row=5, column=0, sticky='w')
+        self.entry_search = ctk.Entry(frm, textvariable=self.search_var, width=20) if not USING_CUSTOM else ctk.CTkEntry(frm, width=160, textvariable=self.search_var)
+        self.entry_search.grid(row=5, column=1, sticky='we')
+        # severity filter simple option menu
+        sev_opts = ['All', 'High', 'Medium', 'Low']
+        if USING_CUSTOM:
+            self.sev_menu = ctk.CTkOptionMenu(frm, values=sev_opts, variable=self.sev_filter_var, command=lambda _: self._apply_filters())
+        else:
+            import tkinter as tk
+            self.sev_menu = ctk.OptionMenu(frm, self.sev_filter_var, *sev_opts, command=lambda _: self._apply_filters())
+        self.sev_menu.grid(row=5, column=2, sticky='we')
+        # export format selector
+        fmt_opts = ['text', 'html', 'json', 'csv', 'markdown', 'sarif']
+        if USING_CUSTOM:
+            self.fmt_menu = ctk.CTkOptionMenu(frm, values=fmt_opts, variable=self.export_format_var)
+        else:
+            self.fmt_menu = ctk.OptionMenu(frm, self.export_format_var, *fmt_opts)
+        self.fmt_menu.grid(row=5, column=3, sticky='we')
+
+        # Results Treeview (moved to row 6 to free row 5 for filters)
         columns = ('severity', 'category', 'location', 'issue')
         self.tree = ttk.Treeview(frm, columns=columns, show='headings', height=14)
         self.tree.heading('severity', text='Severity', command=lambda: self._sort_tree('severity'))
@@ -86,10 +112,18 @@ class SecurityScanApp:
             self.tree.column(col, width=120 if col != 'location' else 280, anchor='w')
         vsb = ttk.Scrollbar(frm, orient='vertical', command=self.tree.yview)
         self.tree.configure(yscroll=vsb.set)
-        self.tree.grid(row=5, column=0, columnspan=3, sticky='nsew', pady=6)
-        vsb.grid(row=5, column=3, sticky='ns')
-        frm.rowconfigure(5, weight=1)
+        self.tree.grid(row=6, column=0, columnspan=3, sticky='nsew', pady=6)
+        vsb.grid(row=6, column=3, sticky='ns')
+        frm.rowconfigure(6, weight=1)
         frm.columnconfigure(2, weight=1)
+
+        # Summary & metrics (row 7)
+        self.summary_var = ctk.StringVar(value='Summary: -')
+        self.metrics_var = ctk.StringVar(value='Metrics: -')
+        lbl_summary = ctk.Label(frm, textvariable=self.summary_var, anchor='w') if not USING_CUSTOM else ctk.CTkLabel(frm, textvariable=self.summary_var, anchor='w')
+        lbl_summary.grid(row=7, column=0, columnspan=4, sticky='we', pady=(4,0))
+        lbl_metrics = ctk.Label(frm, textvariable=self.metrics_var, anchor='w') if not USING_CUSTOM else ctk.CTkLabel(frm, textvariable=self.metrics_var, anchor='w')
+        lbl_metrics.grid(row=8, column=0, columnspan=4, sticky='we')
 
         # Severity tags (colors)
         style = ttk.Style(self.root)
@@ -97,6 +131,47 @@ class SecurityScanApp:
         self.tree.tag_configure('sev-High', foreground='#b30000')
         self.tree.tag_configure('sev-Medium', foreground='#d97706')
         self.tree.tag_configure('sev-Low', foreground='#2563eb')
+
+        # Context menu
+        self._init_context_menu()
+        self.tree.bind('<Button-3>', self._on_right_click)
+        # Search bindings
+        self.entry_search.bind('<Return>', lambda e: self._apply_filters())
+
+    def _init_context_menu(self):
+        import tkinter as tk
+        self.ctx_menu = tk.Menu(self.root, tearoff=0)
+        self.ctx_menu.add_command(label='Open URL', command=self._ctx_open_url)
+        self.ctx_menu.add_command(label='Copy Issue', command=lambda: self._ctx_copy_col('issue'))
+        self.ctx_menu.add_command(label='Copy Location', command=lambda: self._ctx_copy_col('location'))
+        self.ctx_menu.add_command(label='Copy Row', command=self._ctx_copy_row)
+
+    def _on_right_click(self, event):
+        iid = self.tree.identify_row(event.y)
+        if iid:
+            self.tree.selection_set(iid)
+            self.ctx_menu.tk_popup(event.x_root, event.y_root)
+
+    def _ctx_open_url(self):
+        sel = self.tree.selection()
+        if not sel:
+            return
+        loc = self.tree.set(sel[0], 'location')
+        webbrowser.open(loc)
+
+    def _ctx_copy_col(self, col):
+        sel = self.tree.selection()
+        if not sel:
+            return
+        val = self.tree.set(sel[0], col)
+        self.root.clipboard_clear(); self.root.clipboard_append(val)
+
+    def _ctx_copy_row(self):
+        sel = self.tree.selection()
+        if not sel:
+            return
+        vals = self.tree.item(sel[0], 'values')
+        self.root.clipboard_clear(); self.root.clipboard_append('\t'.join(vals))
 
     # ---------------- Sorting ----------------
     def _sort_tree(self, col):
@@ -143,6 +218,8 @@ class SecurityScanApp:
         self.findings.clear()
         self.pages.clear()
         self.stop_event.clear()
+        self.summary_var.set('Summary: -')
+        self.metrics_var.set('Metrics: -')
         self.scanner_thread = threading.Thread(target=self._run_scan, args=(url, depth), daemon=True)
         self.scanner_thread.start()
 
@@ -154,15 +231,15 @@ class SecurityScanApp:
     def _run_scan(self, url: str, depth: int):
         try:
             self._push_status("Crawling phase started")
-            http_client = HTTPClient()
-            crawler = Crawler(url, depth, http_client, status_cb=self._push_status, progress_cb=lambda v: self._push_progress(v * 0.5), stop_event=self.stop_event)
+            self.http_client = HTTPClient()
+            crawler = Crawler(url, depth, self.http_client, status_cb=self._push_status, progress_cb=lambda v: self._push_progress(v * 0.5), stop_event=self.stop_event)
             pages = crawler.crawl()
             self.pages = pages
             if self.stop_event.is_set():
                 self._push_status("Scan cancelled after crawling")
                 return
             self._push_status("Vulnerability testing phase started")
-            scanner = VulnerabilityScanner(http_client, status_cb=self._push_status, progress_cb=lambda v: self._push_progress(0.5 + v * 0.5), stop_event=self.stop_event)
+            scanner = VulnerabilityScanner(self.http_client, status_cb=self._push_status, progress_cb=lambda v: self._push_progress(0.5 + v * 0.5), stop_event=self.stop_event)
             findings = scanner.scan_pages(pages)
             self.findings = findings
             if self.stop_event.is_set():
@@ -170,6 +247,7 @@ class SecurityScanApp:
             else:
                 self._push_status("Scan complete")
             self._render_results()
+            self._update_summary_and_metrics()
             self._push_status("Ready to save report")
             self.status_queue.put(("enable_report", None))
         except Exception:
@@ -181,17 +259,43 @@ class SecurityScanApp:
         for f in self.findings:
             self.tree.insert('', 'end', values=(f.severity, f.category, f.location, f.issue), tags=(f'sev-{f.severity}',))
 
+    def _update_summary_and_metrics(self):
+        from reporting import ReportBuilder
+        rb = ReportBuilder(self.entry_url.get().strip(), self.findings)
+        summ = rb.summary()
+        self.summary_var.set(f"Summary: High={summ.get('High',0)} Medium={summ.get('Medium',0)} Low={summ.get('Low',0)} RiskScore={summ.get('risk_score',0)} Findings={len(self.findings)}")
+        if self.http_client:
+            m = self.http_client.metrics()
+            self.metrics_var.set(f"Metrics: requests={m['requests']} errors={m['errors']} avg={m['avg_response_time']}s total={m['total_time']}s")
+
     def save_report(self):
         if not self.findings and not self.pages:
             messagebox.showinfo("No Data", "Run a scan first")
             return
-        filetypes = [("Text File", "*.txt"), ("HTML File", "*.html")]
-        path = filedialog.asksaveasfilename(defaultextension=".txt", filetypes=filetypes)
+        fmt = self.export_format_var.get()
+        ext_map = {
+            'text': '.txt', 'html': '.html', 'json': '.json', 'csv': '.csv', 'markdown': '.md', 'sarif': '.sarif'
+        }
+        default_ext = ext_map.get(fmt, '.txt')
+        filetypes = [(fmt.upper(), f"*{default_ext}")]
+        from reporting import ReportBuilder
+        path = filedialog.asksaveasfilename(defaultextension=default_ext, filetypes=filetypes)
         if not path:
             return
         rb = ReportBuilder(self.entry_url.get().strip(), self.findings)
         try:
-            content = rb.to_html() if path.lower().endswith('.html') else rb.to_text()
+            if fmt == 'html':
+                content = rb.to_html()
+            elif fmt == 'json':
+                content = rb.to_json()
+            elif fmt == 'csv':
+                content = rb.to_csv()
+            elif fmt == 'markdown':
+                content = rb.to_markdown()
+            elif fmt == 'sarif':
+                content = rb.to_sarif()
+            else:
+                content = rb.to_text()
             with open(path, 'w', encoding='utf-8') as f:
                 f.write(content)
             messagebox.showinfo("Saved", f"Report saved to {path}")
@@ -231,6 +335,19 @@ class SecurityScanApp:
             self.progress.set(value)
         else:
             self.progress['value'] = value * 100
+
+    def _apply_filters(self):
+        query = self.search_var.get().lower().strip()
+        sev = self.sev_filter_var.get()
+        for i in self.tree.get_children():
+            self.tree.delete(i)
+        for f in self.findings:
+            if sev != 'All' and f.severity != sev:
+                continue
+            blob = f"{f.issue} {f.location} {f.category} {f.evidence}".lower()
+            if query and query not in blob:
+                continue
+            self.tree.insert('', 'end', values=(f.severity, f.category, f.location, f.issue), tags=(f'sev-{f.severity}',))
 
     def run(self):
         self.root.mainloop()

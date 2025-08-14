@@ -1,5 +1,5 @@
 from typing import List, Dict
-import time, json
+import time, json, csv, io
 from config import CONFIG
 from scanner.vulnerability import Finding
 
@@ -13,6 +13,18 @@ class ReportBuilder:
         for f in self.findings:
             groups.setdefault(f.category, []).append(f)
         return groups
+
+    def _summary(self) -> Dict[str, int | float]:
+        counts = {"High":0, "Medium":0, "Low":0}
+        weight = {"High":5, "Medium":3, "Low":1}
+        for f in self.findings:
+            counts[f.severity] = counts.get(f.severity,0)+1
+        risk_score = sum(weight.get(f.severity,0) for f in self.findings)
+        counts['risk_score'] = risk_score
+        return counts
+
+    def summary(self) -> Dict[str, int | float]:
+        return self._summary()
 
     def to_text(self) -> str:
         lines = [f"Report for {self.target}", f"Generated: {time.ctime()}", "Disclaimer: " + CONFIG.ETHICAL_WARNING, ""]
@@ -58,5 +70,72 @@ class ReportBuilder:
             "target": self.target,
             "generated": time.time(),
             "disclaimer": CONFIG.ETHICAL_WARNING,
+            "summary": self._summary(),
             "findings": [f.__dict__ for f in self.findings]
         }, indent=2)
+
+    def to_csv(self) -> str:
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(["Severity", "Category", "Issue", "Location", "Evidence", "Risk"])
+        for f in self.findings:
+            writer.writerow([f.severity, f.category, f.issue, f.location, f.evidence, f.risk])
+        return buf.getvalue()
+
+    def to_markdown(self) -> str:
+        lines = [f"# Report for {self.target}", "", f"_Generated: {time.ctime()}_", "", f"> {CONFIG.ETHICAL_WARNING}", "", "| Severity | Category | Issue | Location |", "|---|---|---|---|"]
+        for f in self.findings:
+            lines.append(f"| {f.severity} | {f.category} | {f.issue} | {f.location} |")
+        if not self.findings:
+            lines.append("\n_No issues detected._")
+        lines.append("\n## Details\n")
+        for f in self.findings:
+            lines.extend([
+                f"### {f.issue}",
+                f"*Severity:* {f.severity}  ",
+                f"*Category:* {f.category}  ",
+                f"*Location:* `{f.location}`  ",
+                f"*Evidence:* `{f.evidence}`  ",
+                f"*Risk:* {f.risk}",
+                ""
+            ])
+        return "\n".join(lines)
+
+    def to_sarif(self) -> str:
+        # Minimal SARIF 2.1.0 representation
+        runs = []
+        rules = {}
+        results = []
+        for idx, f in enumerate(self.findings, start=1):
+            rule_id = f.category.replace(' ', '_') + '_' + f.issue.replace(' ', '_')[:40]
+            if rule_id not in rules:
+                rules[rule_id] = {
+                    "id": rule_id,
+                    "name": f.issue,
+                    "shortDescription": {"text": f.issue},
+                    "fullDescription": {"text": f.risk},
+                    "help": {"text": f.risk},
+                    "defaultConfiguration": {"level": f.severity.lower()}
+                }
+            results.append({
+                "ruleId": rule_id,
+                "level": f.severity.lower(),
+                "message": {"text": f.issue + ": " + f.evidence},
+                "locations": [{
+                    "physicalLocation": {
+                        "artifactLocation": {"uri": f.location}
+                    }
+                }]
+            })
+        sarif = {
+            "$schema": "https://schemastore.azurewebsites.net/schemas/json/sarif-2.1.0.json",
+            "version": "2.1.0",
+            "runs": [{
+                "tool": {"driver": {"name": CONFIG.APP_NAME, "informationUri": "https://example.com", "rules": list(rules.values())}},
+                "results": results,
+                "invocations": [{"executionSuccessful": True}],
+                "properties": {"summary": self._summary()}
+            }]
+        }
+        return json.dumps(sarif, indent=2)
+
