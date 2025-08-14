@@ -1,8 +1,8 @@
-from typing import List, Callable, Optional, Dict
+from typing import List, Callable, Optional
 from urllib.parse import urlparse, parse_qs, urlencode
 from scanner.vulnerability import Finding
 from .base_check import BaseCheck
-from crawler import PageData, FormInfo
+from crawler import PageData
 from http_client import HTTPClient
 
 class XSSCheck(BaseCheck):

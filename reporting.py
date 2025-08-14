@@ -1,5 +1,5 @@
 from typing import List, Dict
-import time
+import time, json
 from config import CONFIG
 from scanner.vulnerability import Finding
 
@@ -53,3 +53,10 @@ class ReportBuilder:
         parts.append("</body></html>")
         return "".join(parts)
 
+    def to_json(self) -> str:
+        return json.dumps({
+            "target": self.target,
+            "generated": time.time(),
+            "disclaimer": CONFIG.ETHICAL_WARNING,
+            "findings": [f.__dict__ for f in self.findings]
+        }, indent=2)
