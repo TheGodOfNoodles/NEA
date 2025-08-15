@@ -2,6 +2,9 @@ import threading
 import queue
 import traceback
 import webbrowser
+import json
+import os
+import re
 from typing import List, Dict
 
 try:
@@ -31,6 +34,15 @@ class SecurityScanApp:
             self.root = ctk.Tk()
         self.root.title(CONFIG.APP_NAME)
         self.status_queue = queue.Queue()
+        self._prefs_path = os.path.join(os.getcwd(), 'user_settings.json')
+        self.group_mode_var = None
+        self._risk_canvas = None
+        self._status_log = None
+        self._load_prefs_cache = {}
+        self.selected_checks: List[str] = []
+        self.include_var = None
+        self.exclude_var = None
+        self.case_sensitive_var = None
         self._build_ui()
         self.scanner_thread = None
         self.findings: List[Finding] = []
@@ -39,200 +51,424 @@ class SecurityScanApp:
         self.http_client = None
         self._item_finding_map: Dict[str, Finding] = {}
         self.root.after(200, self._poll_status)
+        self._scan_running = False
+        # legacy button placeholders
+        self.btn_scan = None
+        self.btn_stop = None
+        self.btn_report = None
 
     # ---------------- UI Construction ----------------
     def _build_ui(self):
-        pad = 8
-        frm = ctk.CTkFrame(self.root) if USING_CUSTOM else ctk.Frame(self.root)
-        frm.pack(fill='both', expand=True, padx=pad, pady=pad)
-
-        lbl_url = ctk.CTkLabel(frm, text="Target URL:") if USING_CUSTOM else ctk.Label(frm, text="Target URL:")
+        # Rebuild simplified layout
+        # Clear existing root children if re-run (defensive)
+        for child in self.root.winfo_children():
+            try: child.destroy()
+            except Exception: pass
+        pad = 6
+        outer = ctk.CTkFrame(self.root) if USING_CUSTOM else ctk.Frame(self.root)
+        outer.pack(fill='both', expand=True)
+        # Configure grid responsiveness
+        outer.columnconfigure(0, weight=1)
+        outer.rowconfigure(1, weight=1)
+        # Top controls frame
+        top = ctk.CTkFrame(outer) if USING_CUSTOM else ctk.Frame(outer)
+        top.grid(row=0, column=0, sticky='we', padx=pad, pady=(pad,4))
+        top.columnconfigure(1, weight=1)
+        import tkinter as tk
+        # URL + Depth + Scan button row
+        lbl_url = ctk.CTkLabel(top, text='Target URL:') if USING_CUSTOM else tk.Label(top, text='Target URL:')
         lbl_url.grid(row=0, column=0, sticky='w')
-        self.entry_url = ctk.CTkEntry(frm, width=420) if USING_CUSTOM else ctk.Entry(frm, width=65)
-        self.entry_url.grid(row=0, column=1, sticky='we', columnspan=3, pady=2)
-
-        lbl_depth = ctk.CTkLabel(frm, text="Crawl Depth:") if USING_CUSTOM else ctk.Label(frm, text="Crawl Depth:")
-        lbl_depth.grid(row=1, column=0, sticky='w')
+        self.entry_url = ctk.CTkEntry(top) if USING_CUSTOM else tk.Entry(top, width=65)
+        self.entry_url.grid(row=0, column=1, sticky='we', padx=(4,6))
+        lbl_depth = ctk.CTkLabel(top, text='Depth:') if USING_CUSTOM else tk.Label(top, text='Depth:')
+        lbl_depth.grid(row=0, column=2, sticky='e')
         self.depth_var = ctk.StringVar(value='2')
-        self.entry_depth = ctk.CTkEntry(frm, width=60, textvariable=self.depth_var) if USING_CUSTOM else ctk.Entry(frm, width=6, textvariable=self.depth_var)
-        self.entry_depth.grid(row=1, column=1, sticky='w', pady=2)
-
-        self.btn_scan = ctk.CTkButton(frm, text="Start Scan", command=self.start_scan) if USING_CUSTOM else ctk.Button(frm, text="Start Scan", command=self.start_scan)
-        self.btn_scan.grid(row=2, column=0, pady=4, sticky='we')
-        self.btn_stop = ctk.CTkButton(frm, text="Stop Scan", state='disabled', command=self.stop_scan) if USING_CUSTOM else ctk.Button(frm, text="Stop Scan", state='disabled', command=self.stop_scan)
-        self.btn_stop.grid(row=2, column=1, pady=4, sticky='we')
-        self.btn_report = ctk.CTkButton(frm, text="Save Report", state='disabled', command=self.save_report) if USING_CUSTOM else ctk.Button(frm, text="Save Report", state='disabled', command=self.save_report)
-        self.btn_report.grid(row=2, column=2, pady=4, sticky='we')
-        self.btn_about = ctk.CTkButton(frm, text="Help / About", command=self.show_about) if USING_CUSTOM else ctk.Button(frm, text="Help / About", command=self.show_about)
-        self.btn_about.grid(row=2, column=3, pady=4, sticky='we')
-
+        self.entry_depth = ctk.CTkEntry(top, width=60, textvariable=self.depth_var) if USING_CUSTOM else tk.Entry(top, width=5, textvariable=self.depth_var)
+        self.entry_depth.grid(row=0, column=3, sticky='w', padx=(4,8))
+        # Stateful scan button
+        self.btn_scan_toggle = ctk.CTkButton(top, text='Start Scan', command=self._toggle_scan) if USING_CUSTOM else tk.Button(top, text='Start Scan', command=self._toggle_scan)
+        self.btn_scan_toggle.grid(row=0, column=4, padx=(0,6))
+        # Export button (single consolidated dialog)
+        self.btn_export_dialog = ctk.CTkButton(top, text='Export...', command=self._open_export_dialog) if USING_CUSTOM else tk.Button(top, text='Export...', command=self._open_export_dialog)
+        self.btn_export_dialog.grid(row=0, column=5, padx=(0,6))
+        self.btn_about = ctk.CTkButton(top, text='Help / About', command=self.show_about) if USING_CUSTOM else tk.Button(top, text='Help / About', command=self.show_about)
+        self.btn_about.grid(row=0, column=6, padx=(0,0))
+        # Progress bar below controls
         if USING_CUSTOM:
-            self.progress = ctk.CTkProgressBar(frm)
+            self.progress = ctk.CTkProgressBar(top)
             self.progress.set(0)
         else:
-            self.progress = ttk.Progressbar(frm, maximum=100)
+            from tkinter import ttk as _ttk
+            self.progress = _ttk.Progressbar(top, maximum=100)
             self.progress['value'] = 0
-        self.progress.grid(row=3, column=0, columnspan=4, sticky='we', pady=6)
-
-        self.status_var = ctk.StringVar(value='Idle')
-        self.lbl_status = ctk.CTkLabel(frm, textvariable=self.status_var, anchor='w') if USING_CUSTOM else ctk.Label(frm, textvariable=self.status_var, anchor='w')
-        self.lbl_status.grid(row=4, column=0, columnspan=4, sticky='we')
-
-        # Insert filter row (row 5)
+        self.progress.grid(row=1, column=0, columnspan=7, sticky='we', pady=(6,4))
+        # Filter row (condensed)
+        filter_frame = ctk.CTkFrame(outer) if USING_CUSTOM else tk.Frame(outer)
+        filter_frame.grid(row=1, column=0, sticky='nwe', padx=pad)
+        filter_frame.columnconfigure(1, weight=1)
         self.search_var = ctk.StringVar(value='')
         self.sev_filter_var = ctk.StringVar(value='All')
-        self.export_format_var = ctk.StringVar(value='text')
-        lbl_search = ctk.Label(frm, text='Search:') if not USING_CUSTOM else ctk.CTkLabel(frm, text='Search:')
-        lbl_search.grid(row=5, column=0, sticky='w')
-        self.entry_search = ctk.Entry(frm, textvariable=self.search_var, width=20) if not USING_CUSTOM else ctk.CTkEntry(frm, width=160, textvariable=self.search_var)
-        self.entry_search.grid(row=5, column=1, sticky='we')
-        # severity filter simple option menu
-        sev_opts = ['All', 'High', 'Medium', 'Low']
+        self.case_sensitive_var = tk.BooleanVar(value=False)
+        self.group_mode_var = tk.StringVar(value='None')
+        self.include_var = tk.StringVar(value='')
+        self.exclude_var = tk.StringVar(value='')
+        self.export_format_var = ctk.StringVar(value='text') if USING_CUSTOM else tk.StringVar(value='text')  # kept for backward compat
+        lbl_search = ctk.CTkLabel(filter_frame, text='Search:') if USING_CUSTOM else tk.Label(filter_frame, text='Search:')
+        lbl_search.grid(row=0, column=0, sticky='w')
+        self.entry_search = ctk.CTkEntry(filter_frame, placeholder_text='Search issue, location, parameter...') if USING_CUSTOM else tk.Entry(filter_frame, width=40, textvariable=self.search_var)
+        if not USING_CUSTOM:
+            self.entry_search.configure(textvariable=self.search_var)
+        self.entry_search.grid(row=0, column=1, sticky='we', padx=(4,8))
+        lbl_sev = ctk.CTkLabel(filter_frame, text='Severity:') if USING_CUSTOM else tk.Label(filter_frame, text='Severity:')
+        lbl_sev.grid(row=0, column=2, sticky='e')
+        sev_opts = ['All','High','Medium','Low']
         if USING_CUSTOM:
-            self.sev_menu = ctk.CTkOptionMenu(frm, values=sev_opts, variable=self.sev_filter_var, command=lambda _: self._apply_filters())
+            self.sev_menu = ctk.CTkOptionMenu(filter_frame, values=sev_opts, variable=self.sev_filter_var, command=lambda _: self._apply_filters())
         else:
-            import tkinter as tk
-            self.sev_menu = ctk.OptionMenu(frm, self.sev_filter_var, *sev_opts, command=lambda _: self._apply_filters())
-        self.sev_menu.grid(row=5, column=2, sticky='we')
-        # export format selector
-        fmt_opts = ['text', 'html', 'json', 'csv', 'markdown', 'sarif']
+            self.sev_menu = tk.OptionMenu(filter_frame, self.sev_filter_var, *sev_opts, command=lambda *_: self._apply_filters())
+        self.sev_menu.grid(row=0, column=3, sticky='w', padx=(4,8))
+        # create case sensitive checkbox with proper variable binding
         if USING_CUSTOM:
-            self.fmt_menu = ctk.CTkOptionMenu(frm, values=fmt_opts, variable=self.export_format_var)
+            chk_cs = ctk.CTkCheckBox(filter_frame, text='Case Sensitive', command=self._apply_filters, variable=self.case_sensitive_var)
         else:
-            self.fmt_menu = ctk.OptionMenu(frm, self.export_format_var, *fmt_opts)
-        self.fmt_menu.grid(row=5, column=3, sticky='we')
-
-        # Results Treeview (moved to row 6 to free row 5 for filters)
-        columns = ('severity', 'category', 'location', 'issue')
-        self.tree = ttk.Treeview(frm, columns=columns, show='headings', height=14)
+            chk_cs = tk.Checkbutton(filter_frame, text='Case Sensitive', variable=self.case_sensitive_var, command=self._apply_filters)
+        chk_cs.grid(row=0, column=4, sticky='w', padx=(0,8))
+        lbl_group = ctk.CTkLabel(filter_frame, text='Group By:') if USING_CUSTOM else tk.Label(filter_frame, text='Group By:')
+        lbl_group.grid(row=0, column=5, sticky='e')
+        if USING_CUSTOM:
+            self.grp_menu = ctk.CTkOptionMenu(filter_frame, values=['None','Severity','Category'], variable=self.group_mode_var, command=lambda _: self._apply_filters())
+        else:
+            self.grp_menu = tk.OptionMenu(filter_frame, self.group_mode_var, 'None','Severity','Category', command=lambda *_: self._apply_filters())
+        self.grp_menu.grid(row=0, column=6, sticky='w', padx=(4,8))
+        # Advanced include/exclude (secondary row)
+        lbl_inc = ctk.CTkLabel(filter_frame, text='Include Re:') if USING_CUSTOM else tk.Label(filter_frame, text='Include Re:')
+        lbl_inc.grid(row=1, column=0, sticky='w', pady=(4,0))
+        ent_inc = ctk.CTkEntry(filter_frame, textvariable=self.include_var, placeholder_text='(Optional) pattern') if USING_CUSTOM else tk.Entry(filter_frame, width=25, textvariable=self.include_var)
+        ent_inc.grid(row=1, column=1, sticky='we', padx=(4,8), pady=(4,0))
+        lbl_exc = ctk.CTkLabel(filter_frame, text='Exclude Re:') if USING_CUSTOM else tk.Label(filter_frame, text='Exclude Re:')
+        lbl_exc.grid(row=1, column=2, sticky='e', pady=(4,0))
+        ent_exc = ctk.CTkEntry(filter_frame, textvariable=self.exclude_var, placeholder_text='(Optional) pattern') if USING_CUSTOM else tk.Entry(filter_frame, width=25, textvariable=self.exclude_var)
+        ent_exc.grid(row=1, column=3, sticky='we', padx=(4,8), pady=(4,0))
+        # Results + details frame
+        center = ctk.CTkFrame(outer) if USING_CUSTOM else tk.Frame(outer)
+        center.grid(row=2, column=0, sticky='nsew', padx=pad, pady=(4,4))
+        center.rowconfigure(1, weight=1)
+        center.columnconfigure(0, weight=1)
+        # Tree styling
+        columns = ('severity','issue','location','category')
+        self.tree = ttk.Treeview(center, columns=columns, show='headings', selectmode='extended')
         self.tree.heading('severity', text='Severity', command=lambda: self._sort_tree('severity'))
-        self.tree.heading('category', text='Category', command=lambda: self._sort_tree('category'))
-        self.tree.heading('location', text='Location', command=lambda: self._sort_tree('location'))
         self.tree.heading('issue', text='Issue', command=lambda: self._sort_tree('issue'))
-        for col in columns:
-            self.tree.column(col, width=120 if col != 'location' else 280, anchor='w')
-        vsb = ttk.Scrollbar(frm, orient='vertical', command=self.tree.yview)
+        self.tree.heading('location', text='Location', command=lambda: self._sort_tree('location'))
+        self.tree.heading('category', text='Category', command=lambda: self._sort_tree('category'))
+        self.tree.column('severity', width=90, anchor='w')
+        self.tree.column('issue', width=240, anchor='w')
+        self.tree.column('location', width=320, anchor='w')
+        self.tree.column('category', width=160, anchor='w')
+        style = ttk.Style(self.root)
+        try:
+            style.configure('Treeview', background='#1e1e1e', fieldbackground='#1e1e1e', foreground='#f0f0f0')
+            style.configure('Treeview.Heading', font=('Segoe UI', 9, 'bold'))
+        except Exception:
+            pass
+        vsb = ttk.Scrollbar(center, orient='vertical', command=self.tree.yview)
         self.tree.configure(yscroll=vsb.set)
-        self.tree.grid(row=6, column=0, columnspan=3, sticky='nsew', pady=6)
-        vsb.grid(row=6, column=3, sticky='ns')
-        frm.rowconfigure(6, weight=1)
-        frm.columnconfigure(2, weight=1)
-
-        # Summary & metrics (row 7)
+        self.tree.grid(row=0, column=0, sticky='nsew')
+        vsb.grid(row=0, column=1, sticky='ns')
+        # Finding Details separator
+        sep1 = ttk.Separator(center, orient='horizontal') if not USING_CUSTOM else ctk.CTkFrame(center, height=2)
+        sep1.grid(row=1, column=0, columnspan=2, sticky='we', pady=(6,4))
+        lbl_details = ctk.CTkLabel(center, text='Finding Details:') if USING_CUSTOM else tk.Label(center, text='Finding Details:')
+        lbl_details.grid(row=2, column=0, columnspan=2, sticky='w')
+        self.detail_text = ctk.CTkTextbox(center, height=120) if USING_CUSTOM else tk.Text(center, height=8, wrap='word')
+        self.detail_text.grid(row=3, column=0, columnspan=2, sticky='nsew', pady=(2,2))
+        if not USING_CUSTOM:
+            self.detail_text.configure(state='disabled')
+        center.rowconfigure(3, weight=1)
+        # Summary / Metrics separators
+        sep2 = ttk.Separator(center, orient='horizontal') if not USING_CUSTOM else ctk.CTkFrame(center, height=2)
+        sep2.grid(row=4, column=0, columnspan=2, sticky='we', pady=(6,4))
         self.summary_var = ctk.StringVar(value='Summary: -')
         self.metrics_var = ctk.StringVar(value='Metrics: -')
-        lbl_summary = ctk.Label(frm, textvariable=self.summary_var, anchor='w') if not USING_CUSTOM else ctk.CTkLabel(frm, textvariable=self.summary_var, anchor='w')
-        lbl_summary.grid(row=7, column=0, columnspan=4, sticky='we', pady=(4,0))
-        lbl_metrics = ctk.Label(frm, textvariable=self.metrics_var, anchor='w') if not USING_CUSTOM else ctk.CTkLabel(frm, textvariable=self.metrics_var, anchor='w')
-        lbl_metrics.grid(row=8, column=0, columnspan=4, sticky='we')
+        lbl_summary = ctk.CTkLabel(center, textvariable=self.summary_var, anchor='w') if USING_CUSTOM else tk.Label(center, textvariable=self.summary_var, anchor='w')
+        lbl_summary.grid(row=5, column=0, columnspan=2, sticky='we')
+        lbl_metrics = ctk.CTkLabel(center, textvariable=self.metrics_var, anchor='w') if USING_CUSTOM else tk.Label(center, textvariable=self.metrics_var, anchor='w')
+        lbl_metrics.grid(row=6, column=0, columnspan=2, sticky='we')
+        # Log separator
+        sep3 = ttk.Separator(center, orient='horizontal') if not USING_CUSTOM else ctk.CTkFrame(center, height=2)
+        sep3.grid(row=7, column=0, columnspan=2, sticky='we', pady=(6,4))
+        self._status_log = ctk.CTkTextbox(center, height=110) if USING_CUSTOM else tk.Text(center, height=6, wrap='word')
+        self._status_log.grid(row=8, column=0, columnspan=2, sticky='nsew')
+        if not USING_CUSTOM:
+            self._status_log.configure(state='disabled')
+        center.rowconfigure(8, weight=1)
+        # Bottom status bar
+        status_bar = ctk.CTkFrame(outer) if USING_CUSTOM else tk.Frame(outer, relief='sunken', bd=1)
+        status_bar.grid(row=3, column=0, sticky='we')
+        self.status_var = ctk.StringVar(value='Ready')
+        self.status_label = ctk.CTkLabel(status_bar, textvariable=self.status_var, anchor='w') if USING_CUSTOM else tk.Label(status_bar, textvariable=self.status_var, anchor='w')
+        self.status_label.pack(fill='x', padx=4, pady=2)
 
-        # Severity tags (colors)
-        style = ttk.Style(self.root)
-        # Use tag bindings for colors (ttk doesn't directly style rows; use tag_configure via Treeview tag)
-        self.tree.tag_configure('sev-High', foreground='#b30000')
-        self.tree.tag_configure('sev-Medium', foreground='#d97706')
-        self.tree.tag_configure('sev-Low', foreground='#2563eb')
-
+        # Event bindings & shortcuts
+        self.tree.bind('<<TreeviewSelect>>', lambda e: self._update_detail_pane())
+        self.entry_search.bind('<KeyRelease>', lambda e: self._apply_filters())
+        for w in (ent_inc, ent_exc):
+            w.bind('<KeyRelease>', lambda e: self._apply_filters())
+        self.root.bind('<Control-s>', lambda e: self._open_export_dialog())
+        self.root.bind('<Control-r>', lambda e: self._toggle_scan())
+        self.root.bind('<Control-f>', lambda e: self.entry_search.focus_set())
+        self.root.bind('<Control-g>', lambda e: self._cycle_group_mode())
+        self.root.bind('<Escape>', lambda e: self.stop_scan())
         # Context menu
         self._init_context_menu()
         self.tree.bind('<Button-3>', self._on_right_click)
-        # Search bindings
-        self.entry_search.bind('<Return>', lambda e: self._apply_filters())
+        # Load prefs
+        self._load_prefs()
 
-    def _init_context_menu(self):
-        import tkinter as tk
-        self.ctx_menu = tk.Menu(self.root, tearoff=0)
-        self.ctx_menu.add_command(label='Open URL', command=self._ctx_open_url)
-        self.ctx_menu.add_command(label='Copy Issue', command=lambda: self._ctx_copy_col('issue'))
-        self.ctx_menu.add_command(label='Copy Location', command=lambda: self._ctx_copy_col('location'))
-        self.ctx_menu.add_command(label='Copy Row', command=self._ctx_copy_row)
-        self.ctx_menu.add_separator()
-        self.ctx_menu.add_command(label='Details', command=self._ctx_show_details)
+    # ...existing code...
 
-    def _on_right_click(self, event):
-        iid = self.tree.identify_row(event.y)
-        if iid:
-            self.tree.selection_set(iid)
-            self.ctx_menu.tk_popup(event.x_root, event.y_root)
-
-    def _ctx_open_url(self):
-        sel = self.tree.selection()
-        if not sel:
-            return
-        loc = self.tree.set(sel[0], 'location')
-        webbrowser.open(loc)
-
-    def _ctx_copy_col(self, col):
-        sel = self.tree.selection()
-        if not sel:
-            return
-        val = self.tree.set(sel[0], col)
-        self.root.clipboard_clear(); self.root.clipboard_append(val)
-
-    def _ctx_copy_row(self):
-        sel = self.tree.selection()
-        if not sel:
-            return
-        vals = self.tree.item(sel[0], 'values')
-        self.root.clipboard_clear(); self.root.clipboard_append('\t'.join(vals))
-
-    def _ctx_show_details(self):
-        sel = self.tree.selection()
-        if not sel:
-            return
-        finding = self._item_finding_map.get(sel[0])
-        if finding:
-            self._show_finding_details(finding)
-
-    def _on_double_click(self, event):
-        iid = self.tree.identify_row(event.y)
-        if not iid:
-            return
-        finding = self._item_finding_map.get(iid)
-        if finding:
-            self._show_finding_details(finding)
-
-    def _show_finding_details(self, f: Finding):
-        import tkinter as tk
-        try:
-            from tkinter import scrolledtext
-            use_scrolled = True
-        except Exception:
-            use_scrolled = False
-        win = tk.Toplevel(self.root)
-        win.title(f"Details: {f.issue}")
-        win.geometry('620x500')
-        header = tk.Label(win, text=f"[{f.severity}] {f.issue}", font=('Arial', 12, 'bold'))
-        header.pack(anchor='w', padx=8, pady=(8,4))
-        lines = [
-            f"Category: {f.category}",
-            f"Location: {f.location}",
-        ]
-        if f.parameter:
-            lines.append(f"Parameter: {f.parameter}")
-        if f.payload:
-            lines.append(f"Payload: {f.payload}")
-        lines.extend([
-            f"Evidence: {f.evidence}",
-            f"Risk: {f.risk}",
-        ])
-        if f.description:
-            lines.append(f"Description: {f.description}")
-        if f.recommendation:
-            lines.append(f"Recommendation: {f.recommendation}")
-        if f.references:
-            lines.append("References:")
-            lines.extend([f"  - {r}" for r in f.references])
-        text_content = "\n".join(lines)
-        if use_scrolled:
-            txt = scrolledtext.ScrolledText(win, wrap='word')
+    def _toggle_scan(self):
+        if not self._scan_running:
+            # start scan
+            if self.scanner_thread and self.scanner_thread.is_alive():
+                return
+            url = self.entry_url.get().strip()
+            if not self._valid_url(url):
+                from tkinter import messagebox
+                messagebox.showerror('Invalid URL', 'Enter a valid http(s) URL')
+                return
+            try:
+                depth = int(self.depth_var.get())
+            except ValueError:
+                from tkinter import messagebox
+                messagebox.showerror('Invalid Depth', 'Depth must be a number')
+                return
+            self._scan_running = True
+            self.btn_scan_toggle.configure(text='Stop Scan')
+            self.status_var.set('Starting scan...')
+            self.progress_set(0)
+            self.findings.clear(); self.pages.clear(); self.summary_var.set('Summary: -'); self.metrics_var.set('Metrics: -')
+            self.stop_event.clear()
+            self.scanner_thread = threading.Thread(target=self._run_scan, args=(url, depth), daemon=True)
+            self.scanner_thread.start()
         else:
-            txt = tk.Text(win, wrap='word')
-        txt.pack(fill='both', expand=True, padx=8, pady=4)
-        txt.insert('1.0', text_content)
-        txt.configure(state='disabled')
-        btn_close = tk.Button(win, text='Close', command=win.destroy)
-        btn_close.pack(pady=6)
+            self.stop_scan()
+
+    # ---------------- Actions ----------------
+    def show_about(self):
+        about_text = (f"{CONFIG.APP_NAME} v{CONFIG.VERSION}\n\n" +
+                      "Educational scanner for: XSS, SQLi, Headers, Open Redirect, Info Disclosure\n\n" +
+                      CONFIG.ETHICAL_WARNING)
+        messagebox.showinfo("About", about_text)
+
+    def stop_scan(self):
+        if not self._scan_running:
+            return
+        self.stop_event.set()
+        self.status_var.set('Stopping scan...')
+
+    def _run_scan(self, url: str, depth: int):
+        try:
+            self._push_status('Crawling phase started')
+            self.http_client = HTTPClient()
+            crawler = Crawler(url, depth, self.http_client, status_cb=self._push_status, progress_cb=lambda v: self._push_progress(v * 0.5), stop_event=self.stop_event)
+            pages = crawler.crawl()
+            self.pages = pages
+            if self.stop_event.is_set():
+                self._push_status('Scan cancelled after crawling')
+                return
+            self._push_status('Vulnerability testing phase started')
+            scanner = VulnerabilityScanner(self.http_client, status_cb=self._push_status, progress_cb=lambda v: self._push_progress(0.5 + v * 0.5), stop_event=self.stop_event, enabled_checks=(self.selected_checks if self.selected_checks else None))
+            findings = scanner.scan_pages(pages)
+            self.findings = findings
+            if self.stop_event.is_set():
+                self._push_status('Scan stopped')
+            else:
+                self._push_status('Scan complete')
+            self._render_results()
+            self._update_summary_and_metrics()
+            self._push_status('Ready to export')
+            self.status_queue.put(('enable_report', None))
+        except Exception:
+            self._push_status('Scan failed: ' + traceback.format_exc(limit=1))
+        finally:
+            self.status_queue.put(('scan_done', None))
+            self._scan_running = False
+            try: self.btn_scan_toggle.configure(text='Start Scan')
+            except Exception: pass
+
+    def _render_results(self):
+        self._apply_filters()
+        if not hasattr(self, '_dbl_bind'):
+            self.tree.bind('<Double-1>', self._on_double_click)
+            self._dbl_bind = True
+
+    def _update_summary_and_metrics(self):
+        from reporting import ReportBuilder
+        rb = ReportBuilder(self.entry_url.get().strip(), self.findings)
+        summ = rb.summary()
+        self.summary_var.set(f"Summary: High: {summ.get('High',0)} | Medium: {summ.get('Medium',0)} | Low: {summ.get('Low',0)} | Total Findings: {len(self.findings)} | RiskScore: {summ.get('risk_score',0)}")
+        if self.http_client:
+            m = self.http_client.metrics()
+            self.metrics_var.set(f"Metrics: Requests: {m['requests']} | Errors: {m['errors']} | Avg: {m['avg_response_time']}s | Total: {m['total_time']}s")
+        self._save_prefs()
+
+    def save_report(self):
+        if not self.findings and not self.pages:
+            messagebox.showinfo("No Data", "Run a scan first")
+            return
+        fmt = self.export_format_var.get()
+        ext_map = {'text':'.txt','html':'.html','json':'.json','csv':'.csv','markdown':'.md','sarif':'.sarif'}
+        default_ext = ext_map.get(fmt,'.txt')
+        filetypes=[(fmt.upper(), f"*{default_ext}")]
+        from reporting import ReportBuilder
+        path = filedialog.asksaveasfilename(defaultextension=default_ext, filetypes=filetypes)
+        if not path: return
+        rb = ReportBuilder(self.entry_url.get().strip(), self.findings)
+        try:
+            if fmt=='html': content=rb.to_html()
+            elif fmt=='json': content=rb.to_json()
+            elif fmt=='csv': content=rb.to_csv()
+            elif fmt=='markdown': content=rb.to_markdown()
+            elif fmt=='sarif': content=rb.to_sarif()
+            else: content=rb.to_text()
+            with open(path,'w',encoding='utf-8') as f: f.write(content)
+            self._ephemeral_status(f"Report saved: {path}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to save report: {e}")
+
+    def quick_export(self):
+        from reporting import ReportBuilder
+        fmt = self.export_format_var.get()
+        mode = self.group_mode_var.get() if self.group_mode_var else 'None'
+        findings = []
+        for iid in self.tree.get_children(''):
+            if mode in ('Severity','Category') and iid not in self._item_finding_map:
+                for c in self.tree.get_children(iid):
+                    f = self._item_finding_map.get(c)
+                    if f: findings.append(f)
+            else:
+                f = self._item_finding_map.get(iid)
+                if f: findings.append(f)
+        rb = ReportBuilder(self.entry_url.get().strip() or 'N/A', findings)
+        if fmt=='html': content=rb.to_html()
+        elif fmt=='json': content=rb.to_json()
+        elif fmt=='csv': content=rb.to_csv()
+        elif fmt=='markdown': content=rb.to_markdown()
+        elif fmt=='sarif': content=rb.to_sarif()
+        else: content=rb.to_text()
+        fname = f"quick_report.{fmt if fmt!='text' else 'txt'}"
+        try:
+            with open(fname,'w',encoding='utf-8') as f: f.write(content)
+            self._ephemeral_status(f"Quick export: {fname}")
+        except Exception as e:
+            self._ephemeral_status(f"Export failed: {e}")
+
+    # ---------------- Helpers ----------------
+    def _valid_url(self, url: str) -> bool:
+        return url.startswith('http://') or url.startswith('https://')
+
+    def _push_status(self, msg: str):
+        self.status_queue.put(("status", msg))
+        self._append_status_log(msg)
+
+    def _append_status_log(self, line: str):
+        if not self._status_log:
+            return
+        if USING_CUSTOM:
+            self._status_log.configure(state='normal')
+            self._status_log.insert('end', line + "\n")
+            self._status_log.see('end')
+            self._status_log.configure(state='disabled')
+        else:
+            self._status_log.configure(state='normal')
+            self._status_log.insert('end', line + "\n")
+            self._status_log.see('end')
+            self._status_log.configure(state='disabled')
+
+    def _push_progress(self, value: float):
+        self.status_queue.put(("progress", value))
+
+    def _poll_status(self):
+        try:
+            while True:
+                kind, payload = self.status_queue.get_nowait()
+                if kind == 'status':
+                    self.status_var.set(payload)
+                elif kind == 'progress':
+                    self.progress_set(payload)
+                elif kind == 'scan_done':
+                    # re-enable toggle button
+                    try:
+                        self.btn_scan_toggle.configure(state='normal')
+                    except Exception: pass
+                elif kind == 'enable_report':
+                    try:
+                        self.btn_export_dialog.configure(state='normal')
+                    except Exception: pass
+        except queue.Empty:
+            pass
+        self.root.after(300, self._poll_status)
+
+    def progress_set(self, value: float):
+        value = max(0.0, min(1.0, value))
+        if USING_CUSTOM:
+            self.progress.set(value)
+        else:
+            self.progress['value'] = value * 100
+
+    def _apply_filters(self):
+        query = self.search_var.get().strip()
+        tokens, free = self._parse_advanced_query(query)
+        sev_filter = self.sev_filter_var.get()
+        inc_pat = self.include_var.get().strip() if self.include_var else ''
+        exc_pat = self.exclude_var.get().strip() if self.exclude_var else ''
+        inc_re = None; exc_re = None
+        try:
+            if inc_pat: inc_re = re.compile(inc_pat, re.IGNORECASE)
+        except Exception: inc_re = None
+        try:
+            if exc_pat: exc_re = re.compile(exc_pat, re.IGNORECASE)
+        except Exception: exc_re = None
+        self._clear_tree()
+        mode = self.group_mode_var.get() if self.group_mode_var else 'None'
+        parents = {}
+        sev_icons = {'High':'🔥 High','Medium':'⚠️ Medium','Low':'ℹ️ Low'}
+        for f in self.findings:
+            if sev_filter != 'All' and f.severity != sev_filter:
+                continue
+            if not self._matches_filter(f, tokens, free):
+                continue
+            blob = f"{f.issue} {f.location} {f.category} {f.evidence} {f.description} {f.recommendation} {f.parameter} {f.payload}" if self.case_sensitive_var.get() else f"{f.issue} {f.location} {f.category} {f.evidence} {f.description} {f.recommendation} {f.parameter} {f.payload}".lower()
+            if inc_re and not inc_re.search(blob):
+                continue
+            if exc_re and exc_re.search(blob):
+                continue
+            parent_iid = ''
+            if mode in ('Severity','Category'):
+                key = f.severity if mode=='Severity' else f.category
+                if key not in parents:
+                    parents[key] = self.tree.insert('', 'end', values=(key,'','',''), text=key, open=True)
+                parent_iid = parents[key]
+            sev_val = sev_icons.get(f.severity, f.severity)
+            iid = self.tree.insert(parent_iid, 'end', values=(sev_val, f.issue, f.location, f.category), tags=(f'sev-'+f.severity,))
+            self._item_finding_map[iid] = f
+        self._update_detail_pane()
+        # risk chart removed
+
+    def _clear_tree(self):
+        if not hasattr(self, 'tree'):
+            return
+        for iid in self.tree.get_children():
+            self.tree.delete(iid)
+        self._item_finding_map.clear()
+
+    # Backward compatibility public wrappers (legacy callbacks may reference these)
+    def clear_tree(self):  # legacy name
+        self._clear_tree()
+
+    def apply_filters(self):  # legacy name
+        self._apply_filters()
 
     # ---------------- Sorting ----------------
     def _sort_tree(self, col):
@@ -250,179 +486,360 @@ class SecurityScanApp:
         for index, (_, k) in enumerate(items):
             self.tree.move(k, '', index)
 
-    # ---------------- Actions ----------------
-    def show_about(self):
-        about_text = (f"{CONFIG.APP_NAME} v{CONFIG.VERSION}\n\n" +
-                      "Educational scanner for: XSS, SQLi, Headers, Open Redirect, Info Disclosure\n\n" +
-                      CONFIG.ETHICAL_WARNING)
-        messagebox.showinfo("About", about_text)
-
-    def start_scan(self):
-        if self.scanner_thread and self.scanner_thread.is_alive():
+    def _open_export_dialog(self):
+        import tkinter as tk
+        from tkinter import filedialog, messagebox
+        if not self.findings:
+            messagebox.showinfo('No Findings', 'Nothing to export yet.')
             return
-        url = self.entry_url.get().strip()
-        if not self._valid_url(url):
-            messagebox.showerror("Invalid URL", "Please enter a valid URL starting with http:// or https://")
-            return
-        try:
-            depth = int(self.depth_var.get())
-        except ValueError:
-            messagebox.showerror("Invalid Depth", "Depth must be a number")
-            return
-        self.btn_scan.configure(state='disabled')
-        self.btn_stop.configure(state='normal')
-        self.btn_report.configure(state='disabled')
-        for i in self.tree.get_children():
-            self.tree.delete(i)
-        self.status_var.set('Starting scan...')
-        self.progress_set(0)
-        self.findings.clear()
-        self.pages.clear()
-        self.stop_event.clear()
-        self.summary_var.set('Summary: -')
-        self.metrics_var.set('Metrics: -')
-        self.scanner_thread = threading.Thread(target=self._run_scan, args=(url, depth), daemon=True)
-        self.scanner_thread.start()
-
-    def stop_scan(self):
-        self.stop_event.set()
-        self.status_var.set('Stopping scan...')
-        self.btn_stop.configure(state='disabled')
-
-    def _run_scan(self, url: str, depth: int):
-        try:
-            self._push_status("Crawling phase started")
-            self.http_client = HTTPClient()
-            crawler = Crawler(url, depth, self.http_client, status_cb=self._push_status, progress_cb=lambda v: self._push_progress(v * 0.5), stop_event=self.stop_event)
-            pages = crawler.crawl()
-            self.pages = pages
-            if self.stop_event.is_set():
-                self._push_status("Scan cancelled after crawling")
+        win = tk.Toplevel(self.root)
+        win.title('Export Findings')
+        win.geometry('360x260')
+        scope_var = tk.StringVar(value='all')
+        fmt_var = tk.StringVar(value=self.export_format_var.get())
+        tk.Label(win, text='Scope:').pack(anchor='w', padx=8, pady=(8,2))
+        for val, label in [('all','All Findings'),('filtered','Filtered View'),('selection','Current Selection')]:
+            tk.Radiobutton(win, text=label, variable=scope_var, value=val).pack(anchor='w', padx=16)
+        tk.Label(win, text='Format:').pack(anchor='w', padx=8, pady=(8,2))
+        fmt_box = tk.OptionMenu(win, fmt_var, 'text','html','json','csv','markdown','sarif')
+        fmt_box.pack(anchor='w', padx=16)
+        path_var = tk.StringVar(value='')
+        def choose_path():
+            ext_map = {'text':'.txt','html':'.html','json':'.json','csv':'.csv','markdown':'.md','sarif':'.sarif'}
+            default_ext = ext_map.get(fmt_var.get(), '.txt')
+            p = filedialog.asksaveasfilename(defaultextension=default_ext, filetypes=[(fmt_var.get().upper(), f"*{default_ext}")])
+            if p:
+                path_var.set(p)
+        tk.Button(win, text='Browse...', command=choose_path).pack(anchor='w', padx=16, pady=(8,2))
+        tk.Label(win, textvariable=path_var, wraplength=320, fg='gray').pack(anchor='w', padx=16)
+        def do_export():
+            path = path_var.get().strip()
+            if not path:
+                messagebox.showerror('Path Required', 'Choose export destination.')
                 return
-            self._push_status("Vulnerability testing phase started")
-            scanner = VulnerabilityScanner(self.http_client, status_cb=self._push_status, progress_cb=lambda v: self._push_progress(0.5 + v * 0.5), stop_event=self.stop_event)
-            findings = scanner.scan_pages(pages)
-            self.findings = findings
-            if self.stop_event.is_set():
-                self._push_status("Scan stopped")
-            else:
-                self._push_status("Scan complete")
-            self._render_results()
-            self._update_summary_and_metrics()
-            self._push_status("Ready to save report")
-            self.status_queue.put(("enable_report", None))
+            self.export_format_var.set(fmt_var.get())  # sync for legacy methods
+            from reporting import ReportBuilder
+            # Determine findings list
+            if scope_var.get() == 'all':
+                data = self.findings
+            elif scope_var.get() == 'selection':
+                sels = self.tree.selection()
+                data = [self._item_finding_map[i] for i in sels if i in self._item_finding_map]
+                if not data:
+                    messagebox.showinfo('Empty Selection', 'No selected findings to export.')
+                    return
+            else:  # filtered
+                # Reconstruct filtered list from current tree view leaves
+                data = []
+                for iid in self.tree.get_children(''):
+                    if iid in self._item_finding_map:
+                        data.append(self._item_finding_map[iid])
+                    else:
+                        for c in self.tree.get_children(iid):
+                            if c in self._item_finding_map:
+                                data.append(self._item_finding_map[c])
+            rb = ReportBuilder(self.entry_url.get().strip() or 'N/A', data)
+            fmt = fmt_var.get()
+            if fmt=='html': content=rb.to_html()
+            elif fmt=='json': content=rb.to_json()
+            elif fmt=='csv': content=rb.to_csv()
+            elif fmt=='markdown': content=rb.to_markdown()
+            elif fmt=='sarif': content=rb.to_sarif()
+            else: content=rb.to_text()
+            try:
+                with open(path,'w',encoding='utf-8') as f: f.write(content)
+                self._ephemeral_status(f'Exported {len(data)} findings to {path}')
+                win.destroy()
+            except Exception as e:
+                messagebox.showerror('Export Failed', str(e))
+        tk.Button(win, text='Export', command=do_export).pack(anchor='e', padx=16, pady=8)
+
+    # ---------------- Context Menu ----------------
+    def _init_context_menu(self):
+        import tkinter as tk
+        self.ctx_menu = tk.Menu(self.root, tearoff=0)
+        self.ctx_menu.add_command(label='Open URL', command=self._ctx_open_url)
+        self.ctx_menu.add_command(label='Copy Issue', command=lambda: self._ctx_copy_col('issue'))
+        self.ctx_menu.add_command(label='Copy Location', command=lambda: self._ctx_copy_col('location'))
+        self.ctx_menu.add_command(label='Copy Row', command=self._ctx_copy_row)
+        self.ctx_menu.add_command(label='Copy Selection', command=self._ctx_copy_selection)
+        self.ctx_menu.add_separator()
+        self.ctx_menu.add_command(label='Details', command=self._ctx_show_details)
+
+    def _on_right_click(self, event):
+        iid = self.tree.identify_row(event.y)
+        if iid:
+            self.tree.selection_set(iid)
+            self.ctx_menu.tk_popup(event.x_root, event.y_root)
+
+    def _ctx_open_url(self):
+        sel = self.tree.selection()
+        if not sel: return
+        loc = self.tree.set(sel[0], 'location')
+        webbrowser.open(loc)
+
+    def _ctx_copy_col(self, col):
+        sel = self.tree.selection();
+        if not sel: return
+        val = self.tree.set(sel[0], col)
+        self.root.clipboard_clear(); self.root.clipboard_append(val)
+
+    def _ctx_copy_row(self):
+        sel = self.tree.selection();
+        if not sel: return
+        vals = self.tree.item(sel[0], 'values'); self.root.clipboard_clear(); self.root.clipboard_append('\t'.join(vals))
+
+    def _ctx_copy_selection(self):
+        sels = self.tree.selection(); rows=[]
+        for iid in sels:
+            vals = self.tree.item(iid,'values')
+            if vals: rows.append('\t'.join(vals))
+        if rows:
+            self.root.clipboard_clear(); self.root.clipboard_append('\n'.join(rows))
+
+    def _ctx_show_details(self):
+        sel = self.tree.selection();
+        if not sel: return
+        f = self._item_finding_map.get(sel[0])
+        if f: self._show_finding_details(f)
+
+    def _on_double_click(self, event):
+        iid = self.tree.identify_row(event.y)
+        if not iid: return
+        f = self._item_finding_map.get(iid)
+        if f: self._show_finding_details(f)
+
+    def _show_finding_details(self, f: Finding):
+        import tkinter as tk
+        try:
+            from tkinter import scrolledtext
+            use = True
         except Exception:
-            self._push_status("Scan failed: " + traceback.format_exc(limit=1))
-        finally:
-            self.status_queue.put(("scan_done", None))
-
-    def _render_results(self):
-        self._item_finding_map.clear()
-        for f in self.findings:
-            iid = self.tree.insert('', 'end', values=(f.severity, f.category, f.location, f.issue), tags=(f'sev-{f.severity}',))
-            self._item_finding_map[iid] = f
-        # bind double-click once (idempotent)
-        if not hasattr(self, '_dbl_bind'):  # ensure one-time binding
-            self.tree.bind('<Double-1>', self._on_double_click)
-            self._dbl_bind = True
-
-    def _update_summary_and_metrics(self):
-        from reporting import ReportBuilder
-        rb = ReportBuilder(self.entry_url.get().strip(), self.findings)
-        summ = rb.summary()
-        self.summary_var.set(f"Summary: High={summ.get('High',0)} Medium={summ.get('Medium',0)} Low={summ.get('Low',0)} RiskScore={summ.get('risk_score',0)} Findings={len(self.findings)}")
-        if self.http_client:
-            m = self.http_client.metrics()
-            self.metrics_var.set(f"Metrics: requests={m['requests']} errors={m['errors']} avg={m['avg_response_time']}s total={m['total_time']}s")
-
-    def save_report(self):
-        if not self.findings and not self.pages:
-            messagebox.showinfo("No Data", "Run a scan first")
-            return
-        fmt = self.export_format_var.get()
-        ext_map = {
-            'text': '.txt', 'html': '.html', 'json': '.json', 'csv': '.csv', 'markdown': '.md', 'sarif': '.sarif'
-        }
-        default_ext = ext_map.get(fmt, '.txt')
-        filetypes = [(fmt.upper(), f"*{default_ext}")]
-        from reporting import ReportBuilder
-        path = filedialog.asksaveasfilename(defaultextension=default_ext, filetypes=filetypes)
-        if not path:
-            return
-        rb = ReportBuilder(self.entry_url.get().strip(), self.findings)
-        try:
-            if fmt == 'html':
-                content = rb.to_html()
-            elif fmt == 'json':
-                content = rb.to_json()
-            elif fmt == 'csv':
-                content = rb.to_csv()
-            elif fmt == 'markdown':
-                content = rb.to_markdown()
-            elif fmt == 'sarif':
-                content = rb.to_sarif()
-            else:
-                content = rb.to_text()
-            with open(path, 'w', encoding='utf-8') as f:
-                f.write(content)
-            messagebox.showinfo("Saved", f"Report saved to {path}")
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to save report: {e}")
-
-    # ---------------- Helpers ----------------
-    def _valid_url(self, url: str) -> bool:
-        return url.startswith('http://') or url.startswith('https://')
-
-    def _push_status(self, msg: str):
-        self.status_queue.put(("status", msg))
-
-    def _push_progress(self, value: float):
-        self.status_queue.put(("progress", value))
-
-    def _poll_status(self):
-        try:
-            while True:
-                kind, payload = self.status_queue.get_nowait()
-                if kind == 'status':
-                    self.status_var.set(payload)
-                elif kind == 'progress':
-                    self.progress_set(payload)
-                elif kind == 'scan_done':
-                    self.btn_scan.configure(state='normal')
-                    self.btn_stop.configure(state='disabled')
-                elif kind == 'enable_report':
-                    self.btn_report.configure(state='normal')
-        except queue.Empty:
-            pass
-        self.root.after(300, self._poll_status)
-
-    def progress_set(self, value: float):
-        value = max(0.0, min(1.0, value))
-        if USING_CUSTOM:
-            self.progress.set(value)
+            use = False
+        win = tk.Toplevel(self.root)
+        win.title(f"Details: {f.issue}")
+        win.geometry('620x500')
+        tk.Label(win, text=f"[{f.severity}] {f.issue}", font=('Arial',12,'bold')).pack(anchor='w', padx=8, pady=(8,4))
+        parts = [
+            f"Category: {f.category}",
+            f"Location: {f.location}",
+            f"Parameter: {f.parameter or '-'}",
+            f"Payload: {f.payload or '-'}",
+            f"Evidence: {f.evidence}",
+            f"Risk: {f.risk}",
+            f"Description: {f.description}",
+            f"Recommendation: {f.recommendation}",
+            "References:" if f.references else "References: -"
+        ] + (["  - "+r for r in f.references] if f.references else [])
+        blob = '\n'.join(parts)
+        if use:
+            txt = scrolledtext.ScrolledText(win, wrap='word')
         else:
-            self.progress['value'] = value * 100
+            txt = tk.Text(win, wrap='word')
+        txt.pack(fill='both', expand=True, padx=8, pady=4)
+        txt.insert('1.0', blob)
+        txt.configure(state='disabled')
+        tk.Button(win, text='Close', command=win.destroy).pack(pady=6)
 
-    def _apply_filters(self):
-        query = self.search_var.get().lower().strip()
-        sev = self.sev_filter_var.get()
-        for i in self.tree.get_children():
-            self.tree.delete(i)
-        self._item_finding_map.clear()
-        for f in self.findings:
-            if sev != 'All' and f.severity != sev:
+    def _set_sev_filter(self, sev):
+        self.sev_filter_var.set(sev)
+        self._apply_filters()
+
+    def _choose_checks(self):
+        import tkinter as tk
+        win = tk.Toplevel(self.root)
+        win.title('Select Checks')
+        win.geometry('260x360')
+        from scanner.engine import VulnerabilityScanner
+        temp_engine = VulnerabilityScanner(HTTPClient())
+        all_checks = sorted([c.name for c in temp_engine.check_classes])
+        vars_map = {}
+        frame = tk.Frame(win); frame.pack(fill='both', expand=True)
+        for name in all_checks:
+            var = tk.BooleanVar(value=(not self.selected_checks) or (name in self.selected_checks))
+            cb = tk.Checkbutton(frame, text=name, variable=var)
+            cb.pack(anchor='w')
+            vars_map[name] = var
+        def apply_close():
+            self.selected_checks = [n for n,v in vars_map.items() if v.get()]
+            win.destroy()
+        tk.Button(win, text='Apply', command=apply_close).pack(pady=4)
+
+    def _retest_selected(self):
+        if not self.http_client or not self.pages:
+            return
+        sels = self.tree.selection()
+        targets = set()
+        for iid in sels:
+            f = self._item_finding_map.get(iid)
+            if f:
+                for url in self.pages.keys():
+                    if f.location.startswith(url):
+                        targets.add(url); break
+        if not targets:
+            return
+        subset = {u:self.pages[u] for u in targets if u in self.pages}
+        scanner = VulnerabilityScanner(self.http_client, status_cb=self._push_status, enabled_checks=(self.selected_checks if self.selected_checks else None))
+        new_findings = scanner.scan_pages(subset)
+        existing_keys = {(f.issue, f.location, f.evidence) for f in self.findings}
+        added = 0
+        for f in new_findings:
+            k = (f.issue, f.location, f.evidence)
+            if k not in existing_keys:
+                self.findings.append(f); existing_keys.add(k); added += 1
+        self._render_results()
+        self._update_summary_and_metrics()
+        self._push_status(f"Re-test added {added} findings")
+
+    def _export_selection(self):
+        sels = self.tree.selection()
+        if not sels:
+            self._ephemeral_status('No selection to export')
+            return
+        selected = [self._item_finding_map[iid] for iid in sels if iid in self._item_finding_map]
+        if not selected:
+            self._ephemeral_status('No leaf findings selected')
+            return
+        from reporting import ReportBuilder
+        rb = ReportBuilder(self.entry_url.get().strip(), selected)
+        fmt = self.export_format_var.get()
+        if fmt == 'html': content = rb.to_html()
+        elif fmt == 'json': content = rb.to_json()
+        elif fmt == 'csv': content = rb.to_csv()
+        elif fmt == 'markdown': content = rb.to_markdown()
+        elif fmt == 'sarif': content = rb.to_sarif()
+        else: content = rb.to_text()
+        fname = f"selection_report.{fmt if fmt!='text' else 'txt'}"
+        with open(fname,'w',encoding='utf-8') as fh: fh.write(content)
+        self._ephemeral_status(f"Selection exported: {fname}")
+
+    def _save_prefs(self):
+        try:
+            data = {
+                'last_url': self.entry_url.get().strip(),
+                'depth': self.depth_var.get(),
+                'format': self.export_format_var.get(),
+                'group_mode': self.group_mode_var.get() if self.group_mode_var else 'None',
+                'geometry': self.root.geometry(),
+                'selected_checks': self.selected_checks,
+                'include_re': self.include_var.get() if self.include_var else '',
+                'exclude_re': self.exclude_var.get() if self.exclude_var else ''
+            }
+            with open(self._prefs_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f)
+        except Exception:
+            pass
+
+    def _load_prefs(self):
+        try:
+            if os.path.exists(self._prefs_path):
+                with open(self._prefs_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                if data.get('last_url'):
+                    self.entry_url.delete(0, 'end'); self.entry_url.insert(0, data['last_url'])
+                if data.get('depth'): self.depth_var.set(data['depth'])
+                if data.get('format'): self.export_format_var.set(data['format'])
+                if self.group_mode_var and 'group_mode' in data: self.group_mode_var.set(data['group_mode'])
+                if 'selected_checks' in data: self.selected_checks = data['selected_checks']
+                if self.include_var and data.get('include_re') is not None: self.include_var.set(data.get('include_re',''))
+                if self.exclude_var and data.get('exclude_re') is not None: self.exclude_var.set(data.get('exclude_re',''))
+                if data.get('geometry'): self.root.geometry(data['geometry'])
+        except Exception:
+            pass
+
+    def _cycle_group_mode(self):
+        order = ['None','Severity','Category']
+        cur = self.group_mode_var.get() if self.group_mode_var else 'None'
+        try:
+            idx = order.index(cur)
+        except ValueError:
+            idx = 0
+        nxt = order[(idx+1)%len(order)]
+        if self.group_mode_var:
+            self.group_mode_var.set(nxt)
+            self._apply_filters()
+
+    def _toggle_group(self):
+        if self._group_mode_var is not None:
+            val = not self._group_mode_var.get()
+            self._group_mode_var.set(val)
+            self._apply_filters()
+
+    def _update_detail_pane(self):
+        if not hasattr(self, 'detail_text'):
+            return
+        sels = self.tree.selection()
+        lines = []
+        for iid in sels:
+            f = self._item_finding_map.get(iid)
+            if not f:
                 continue
-            blob = f"{f.issue} {f.location} {f.category} {f.evidence} {f.description} {f.recommendation}".lower()
-            if query and query not in blob:
-                continue
-            iid = self.tree.insert('', 'end', values=(f.severity, f.category, f.location, f.issue), tags=(f'sev-{f.severity}',))
-            self._item_finding_map[iid] = f
+            lines.append(f"[{f.severity}] {f.issue}\nLocation: {f.location}\nCategory: {f.category}\nParameter: {f.parameter or '-'}\nPayload: {f.payload or '-'}\nEvidence: {f.evidence}\nRisk: {f.risk}\nDescription: {f.description}\nRecommendation: {f.recommendation}\nReferences: {'; '.join(f.references) if f.references else '-'}\n---")
+        text_blob = "\n".join(lines) if lines else "(No selection)"
+        if USING_CUSTOM:
+            self.detail_text.configure(state='normal')
+            self.detail_text.delete('1.0', 'end')
+            self.detail_text.insert('1.0', text_blob)
+            self.detail_text.configure(state='disabled')
+        else:
+            self.detail_text.configure(state='normal')
+            self.detail_text.delete('1.0', 'end')
+            self.detail_text.insert('1.0', text_blob)
+            self.detail_text.configure(state='disabled')
+
+    def _ephemeral_status(self, msg: str):
+        self.status_var.set(msg)
+        # auto-reset after delay
+        try:
+            self.root.after(4000, lambda: self.status_var.set('Ready'))
+        except Exception:
+            pass
 
     def run(self):
-        self.root.mainloop()
+        """Start the Tk main event loop."""
+        try:
+            self.root.mainloop()
+        except KeyboardInterrupt:
+            pass
+
+    def _parse_advanced_query(self, query: str):
+        tokens = {}
+        free_terms = []
+        for part in query.split():
+            if ':' in part:
+                k, v = part.split(':', 1)
+                if k and v:
+                    tokens.setdefault(k.lower(), []).append(v.lower())
+            else:
+                if part:
+                    free_terms.append(part.lower())
+        return tokens, free_terms
+
+    def _matches_filter(self, f: Finding, tokens: dict, free_terms: list) -> bool:
+        if self.case_sensitive_var and self.case_sensitive_var.get():
+            blob = f"{f.issue} {f.location} {f.category} {f.evidence} {f.description} {f.recommendation} {f.parameter} {f.payload}"
+            def norm(x): return x
+        else:
+            blob = f"{f.issue} {f.location} {f.category} {f.evidence} {f.description} {f.recommendation} {f.parameter} {f.payload}".lower()
+            def norm(x): return x.lower()
+        for term in free_terms:
+            if norm(term) not in blob:
+                return False
+        field_map = {
+            'severity': norm(f.severity),
+            'category': norm(f.category),
+            'param': norm(f.parameter),
+            'parameter': norm(f.parameter),
+            'issue': norm(f.issue),
+            'location': norm(f.location),
+        }
+        for k, vals in tokens.items():
+            fv = field_map.get(k)
+            if fv is None or not any(norm(v) in fv for v in vals):
+                return False
+        return True
 
 # Entry helper
 def main():
     app = SecurityScanApp()
     app.run()
-
