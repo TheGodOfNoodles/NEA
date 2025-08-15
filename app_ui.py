@@ -26,10 +26,23 @@ from reporting import ReportBuilder
 
 class SecurityScanApp:
     def __init__(self):
+        # Attempt to use customtkinter, but gracefully fallback if underlying Tcl/Tk not available
+        global USING_CUSTOM, ctk
         if USING_CUSTOM:
-            ctk.set_appearance_mode("System")
-            ctk.set_default_color_theme("blue")
-            self.root = ctk.CTk()
+            try:
+                ctk.set_appearance_mode("System")
+                ctk.set_default_color_theme("blue")
+                self.root = ctk.CTk()
+            except Exception:
+                # Fallback to standard tkinter to avoid hard failure in headless / limited envs
+                try:
+                    import tkinter as tk_fallback
+                    from tkinter import ttk, messagebox, filedialog  # ensure symbols loaded
+                    USING_CUSTOM = False
+                    ctk = tk_fallback  # rebind alias so rest of code uses standard widgets
+                    self.root = tk_fallback.Tk()
+                except Exception as e:
+                    raise RuntimeError(f"Failed to initialize any Tk root: {e}")
         else:
             self.root = ctk.Tk()
         self.root.title(CONFIG.APP_NAME)
@@ -697,6 +710,15 @@ class SecurityScanApp:
             self._ephemeral_status('No selection to export')
             return
         selected = [self._item_finding_map[iid] for iid in sels if iid in self._item_finding_map]
+        # Fallback: if selection corresponds to group parent(s), collect their leaf children
+        if not selected:
+            leaf_candidates = []
+            for parent in sels:
+                for child in self.tree.get_children(parent):
+                    f = self._item_finding_map.get(child)
+                    if f:
+                        leaf_candidates.append(f)
+            selected = leaf_candidates
         if not selected:
             self._ephemeral_status('No leaf findings selected')
             return
@@ -799,47 +821,71 @@ class SecurityScanApp:
         """Start the Tk main event loop."""
         try:
             self.root.mainloop()
-        except KeyboardInterrupt:
+        finally:
             pass
 
+
     def _parse_advanced_query(self, query: str):
+        """Parse simple key:value tokens out of the search box.
+        Returns (tokens_dict, free_text_lowercase)
+        Supported keys map directly to Finding attributes: sev,severity,issue,loc,location,cat,category,param,parameter,payload,risk,evidence.
+        Anything without a colon is treated as free text (space joined)."""
         tokens = {}
-        free_terms = []
+        free_parts = []
         for part in query.split():
             if ':' in part:
                 k, v = part.split(':', 1)
+                k = k.strip().lower(); v = v.strip()
                 if k and v:
-                    tokens.setdefault(k.lower(), []).append(v.lower())
+                    tokens[k] = v
             else:
-                if part:
-                    free_terms.append(part.lower())
-        return tokens, free_terms
+                free_parts.append(part)
+        free_text = ' '.join(free_parts)
+        return tokens, free_text
 
-    def _matches_filter(self, f: Finding, tokens: dict, free_terms: list) -> bool:
-        if self.case_sensitive_var and self.case_sensitive_var.get():
-            blob = f"{f.issue} {f.location} {f.category} {f.evidence} {f.description} {f.recommendation} {f.parameter} {f.payload}"
-            def norm(x): return x
-        else:
-            blob = f"{f.issue} {f.location} {f.category} {f.evidence} {f.description} {f.recommendation} {f.parameter} {f.payload}".lower()
-            def norm(x): return x.lower()
-        for term in free_terms:
-            if norm(term) not in blob:
-                return False
-        field_map = {
-            'severity': norm(f.severity),
-            'category': norm(f.category),
-            'param': norm(f.parameter),
-            'parameter': norm(f.parameter),
-            'issue': norm(f.issue),
-            'location': norm(f.location),
+    def _matches_filter(self, finding: Finding, tokens: dict, free_text: str) -> bool:
+        if not tokens and not free_text:
+            return True
+        # attribute map
+        attr_map = {
+            'severity': finding.severity,
+            'sev': finding.severity,
+            'issue': finding.issue,
+            'location': finding.location,
+            'loc': finding.location,
+            'category': finding.category,
+            'cat': finding.category,
+            'parameter': finding.parameter,
+            'param': finding.parameter,
+            'payload': finding.payload,
+            'risk': finding.risk,
+            'evidence': finding.evidence,
         }
-        for k, vals in tokens.items():
-            fv = field_map.get(k)
-            if fv is None or not any(norm(v) in fv for v in vals):
+        cs = self.case_sensitive_var.get() if self.case_sensitive_var else False
+        for k, needle in tokens.items():
+            hay = attr_map.get(k)
+            if hay is None:
                 return False
+            if not cs:
+                hay = hay.lower(); needle_cmp = needle.lower()
+            else:
+                needle_cmp = needle
+            if needle_cmp not in hay:
+                return False
+        if free_text:
+            blob = f"{finding.issue} {finding.location} {finding.category} {finding.parameter} {finding.payload} {finding.evidence} {finding.risk}"
+            if not cs:
+                blob = blob.lower(); search = free_text.lower()
+            else:
+                search = free_text
+            for term in search.split():
+                if term not in blob:
+                    return False
         return True
 
-# Entry helper
-def main():
+def main():  # convenience for console_scripts / main entry
     app = SecurityScanApp()
     app.run()
+
+if __name__ == '__main__':
+    main()
