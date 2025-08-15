@@ -37,6 +37,7 @@ class SecurityScanApp:
         self.pages: Dict[str, PageData] = {}
         self.stop_event = threading.Event()
         self.http_client = None
+        self._item_finding_map: Dict[str, Finding] = {}
         self.root.after(200, self._poll_status)
 
     # ---------------- UI Construction ----------------
@@ -145,6 +146,8 @@ class SecurityScanApp:
         self.ctx_menu.add_command(label='Copy Issue', command=lambda: self._ctx_copy_col('issue'))
         self.ctx_menu.add_command(label='Copy Location', command=lambda: self._ctx_copy_col('location'))
         self.ctx_menu.add_command(label='Copy Row', command=self._ctx_copy_row)
+        self.ctx_menu.add_separator()
+        self.ctx_menu.add_command(label='Details', command=self._ctx_show_details)
 
     def _on_right_click(self, event):
         iid = self.tree.identify_row(event.y)
@@ -172,6 +175,64 @@ class SecurityScanApp:
             return
         vals = self.tree.item(sel[0], 'values')
         self.root.clipboard_clear(); self.root.clipboard_append('\t'.join(vals))
+
+    def _ctx_show_details(self):
+        sel = self.tree.selection()
+        if not sel:
+            return
+        finding = self._item_finding_map.get(sel[0])
+        if finding:
+            self._show_finding_details(finding)
+
+    def _on_double_click(self, event):
+        iid = self.tree.identify_row(event.y)
+        if not iid:
+            return
+        finding = self._item_finding_map.get(iid)
+        if finding:
+            self._show_finding_details(finding)
+
+    def _show_finding_details(self, f: Finding):
+        import tkinter as tk
+        try:
+            from tkinter import scrolledtext
+            use_scrolled = True
+        except Exception:
+            use_scrolled = False
+        win = tk.Toplevel(self.root)
+        win.title(f"Details: {f.issue}")
+        win.geometry('620x500')
+        header = tk.Label(win, text=f"[{f.severity}] {f.issue}", font=('Arial', 12, 'bold'))
+        header.pack(anchor='w', padx=8, pady=(8,4))
+        lines = [
+            f"Category: {f.category}",
+            f"Location: {f.location}",
+        ]
+        if f.parameter:
+            lines.append(f"Parameter: {f.parameter}")
+        if f.payload:
+            lines.append(f"Payload: {f.payload}")
+        lines.extend([
+            f"Evidence: {f.evidence}",
+            f"Risk: {f.risk}",
+        ])
+        if f.description:
+            lines.append(f"Description: {f.description}")
+        if f.recommendation:
+            lines.append(f"Recommendation: {f.recommendation}")
+        if f.references:
+            lines.append("References:")
+            lines.extend([f"  - {r}" for r in f.references])
+        text_content = "\n".join(lines)
+        if use_scrolled:
+            txt = scrolledtext.ScrolledText(win, wrap='word')
+        else:
+            txt = tk.Text(win, wrap='word')
+        txt.pack(fill='both', expand=True, padx=8, pady=4)
+        txt.insert('1.0', text_content)
+        txt.configure(state='disabled')
+        btn_close = tk.Button(win, text='Close', command=win.destroy)
+        btn_close.pack(pady=6)
 
     # ---------------- Sorting ----------------
     def _sort_tree(self, col):
@@ -256,8 +317,14 @@ class SecurityScanApp:
             self.status_queue.put(("scan_done", None))
 
     def _render_results(self):
+        self._item_finding_map.clear()
         for f in self.findings:
-            self.tree.insert('', 'end', values=(f.severity, f.category, f.location, f.issue), tags=(f'sev-{f.severity}',))
+            iid = self.tree.insert('', 'end', values=(f.severity, f.category, f.location, f.issue), tags=(f'sev-{f.severity}',))
+            self._item_finding_map[iid] = f
+        # bind double-click once (idempotent)
+        if not hasattr(self, '_dbl_bind'):  # ensure one-time binding
+            self.tree.bind('<Double-1>', self._on_double_click)
+            self._dbl_bind = True
 
     def _update_summary_and_metrics(self):
         from reporting import ReportBuilder
@@ -341,13 +408,15 @@ class SecurityScanApp:
         sev = self.sev_filter_var.get()
         for i in self.tree.get_children():
             self.tree.delete(i)
+        self._item_finding_map.clear()
         for f in self.findings:
             if sev != 'All' and f.severity != sev:
                 continue
-            blob = f"{f.issue} {f.location} {f.category} {f.evidence}".lower()
+            blob = f"{f.issue} {f.location} {f.category} {f.evidence} {f.description} {f.recommendation}".lower()
             if query and query not in blob:
                 continue
-            self.tree.insert('', 'end', values=(f.severity, f.category, f.location, f.issue), tags=(f'sev-{f.severity}',))
+            iid = self.tree.insert('', 'end', values=(f.severity, f.category, f.location, f.issue), tags=(f'sev-{f.severity}',))
+            self._item_finding_map[iid] = f
 
     def run(self):
         self.root.mainloop()

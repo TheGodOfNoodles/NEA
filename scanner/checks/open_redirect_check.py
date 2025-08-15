@@ -38,7 +38,14 @@ class OpenRedirectCheck(BaseCheck):
                         location=f"{page.url} (param: {param})",
                         evidence=f"Redirects to external {TEST_EXTERNAL}",
                         risk="Can be abused for phishing and chaining attacks.",
-                        category="Open Redirect"
+                        category="Open Redirect",
+                        description="Application allows unvalidated redirection to an arbitrary external domain via a user-controlled parameter.",
+                        recommendation="Validate redirect targets against an allow-list or use internal identifiers; avoid directly using user input in Location headers.",
+                        references=[
+                            "https://owasp.org/www-community/attacks/Unvalidated_Redirects_and_Forwards",
+                            "https://owasp.org/Top10/A01_2021-Broken_Access_Control/"
+                        ],
+                        parameter=param,
+                        payload=TEST_EXTERNAL
                     ))
         return findings
-

@@ -30,7 +30,13 @@ class CookieSecurityCheck(BaseCheck):
                     location=page.url,
                     evidence=cookie_name,
                     risk="Missing cookie protections may allow theft or CSRF.",
-                    category="Cookies"
+                    category="Cookies",
+                    description="One or more security attributes are absent on the Set-Cookie header, increasing risk of interception or misuse.",
+                    recommendation="Add HttpOnly, Secure (for HTTPS), and SameSite (Strict/Lax) attributes to session and sensitive cookies.",
+                    references=[
+                        "https://owasp.org/www-community/HttpOnly",
+                        "https://developer.mozilla.org/docs/Web/HTTP/Headers/Set-Cookie"
+                    ],
+                    parameter=cookie_name
                 ))
         return findings
-

@@ -39,7 +39,15 @@ class XSSCheck(BaseCheck):
                             location=f"{page.url} (param: {param})",
                             evidence=payload,
                             risk="Attackers could run malicious scripts in users' browsers.",
-                            category="Cross-Site Scripting"
+                            category="Cross-Site Scripting",
+                            description="The application reflects user-supplied input into the response without proper output encoding, enabling script injection.",
+                            recommendation="Implement context-aware output encoding (e.g., HTML entity encoding), validate/clean input, and set a restrictive Content-Security-Policy.",
+                            references=[
+                                "https://owasp.org/www-community/attacks/xss/",
+                                "https://cheatsheetseries.owasp.org/cheatsheets/Cross_Site_Scripting_Prevention_Cheat_Sheet.html"
+                            ],
+                            parameter=param,
+                            payload=payload
                         ))
                         break
         # Form tests
@@ -63,8 +71,15 @@ class XSSCheck(BaseCheck):
                             location=f"Form {form.action} field {field.name}",
                             evidence=payload,
                             risk="Attackers could run malicious scripts in users' browsers.",
-                            category="Cross-Site Scripting"
+                            category="Cross-Site Scripting",
+                            description="A form field's value is reflected unsafely in the server response, indicating insufficient output encoding.",
+                            recommendation="Apply server-side output encoding, prefer framework templating auto-escaping, and sanitize untrusted HTML/JS.",
+                            references=[
+                                "https://owasp.org/www-community/attacks/xss/",
+                                "https://owasp.org/Top10/A03_2021-Injection/"
+                            ],
+                            parameter=field.name,
+                            payload=payload
                         ))
                         break
         return findings
-

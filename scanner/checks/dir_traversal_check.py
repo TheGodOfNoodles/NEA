@@ -38,8 +38,15 @@ class DirectoryTraversalCheck(BaseCheck):
                         location=f"{page.url} (param: {param})",
                         evidence=payload,
                         risk='May allow reading arbitrary server files.',
-                        category='Directory Traversal'
+                        category='Directory Traversal',
+                        description='Application appears to concatenate user-controlled input into file system paths without proper sanitisation.',
+                        recommendation='Normalise and validate path input, restrict to whitelisted directories, and avoid directly using user input in file operations.',
+                        references=[
+                            'https://owasp.org/www-community/attacks/Path_Traversal',
+                            'https://cheatsheetseries.owasp.org/cheatsheets/File_Upload_Cheat_Sheet.html'
+                        ],
+                        parameter=param,
+                        payload=payload
                     ))
                     break
         return findings
-

@@ -23,7 +23,12 @@ class CSRFCheck(BaseCheck):
                     location=form.action,
                     evidence=", ".join(sorted(field_names)) or "(no fields)",
                     risk="May allow Cross-Site Request Forgery attacks.",
-                    category="CSRF"
+                    category="CSRF",
+                    description="A POST form lacks an identifiable anti-CSRF token parameter, making forged state-changing requests possible.",
+                    recommendation="Include a cryptographically strong, per-session or per-request CSRF token in each state-changing form and validate it server-side.",
+                    references=[
+                        "https://owasp.org/www-community/attacks/csrf",
+                        "https://owasp.org/Top10/A01_2021-Broken_Access_Control/"
+                    ]
                 ))
         return findings
-

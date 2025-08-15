@@ -8,6 +8,11 @@ from http_client import HTTPClient
 BOOLEAN_DIFF_THRESHOLD = 50
 TIME_DELAY_SECONDS = 5
 
+SQLI_REFERENCES = [
+    "https://owasp.org/www-community/attacks/SQL_Injection",
+    "https://owasp.org/Top10/A03_2021-Injection/"
+]
+
 class SQLiCheck(BaseCheck):
     name = "sqli"
     description = "Basic SQL Injection heuristics (error, boolean, time-based)"
@@ -40,7 +45,12 @@ class SQLiCheck(BaseCheck):
                         location=f"{page.url} (param: {param})",
                         evidence="SQL error message detected",
                         risk="Could allow database access or data theft.",
-                        category="SQL Injection"
+                        category="SQL Injection",
+                        description="Database error messages indicate that user-supplied input is concatenated into SQL without proper parameterization.",
+                        recommendation="Use parameterized queries / prepared statements and enforce server-side input validation. Suppress verbose SQL errors in production.",
+                        references=SQLI_REFERENCES,
+                        parameter=param,
+                        payload=inj_value
                     ))
                     continue
                 # Boolean-based
@@ -61,7 +71,12 @@ class SQLiCheck(BaseCheck):
                             location=f"{page.url} (param: {param})",
                             evidence="Response length differs for boolean conditions",
                             risk="Could allow database access or data theft.",
-                            category="SQL Injection"
+                            category="SQL Injection",
+                            description="Application behavior differs based on injected boolean condition, suggesting dynamic SQL evaluation.",
+                            recommendation="Adopt parameterized queries and avoid constructing SQL strings with unsanitized input.",
+                            references=SQLI_REFERENCES,
+                            parameter=param,
+                            payload=true_payload + " | " + false_payload
                         ))
                         continue
                 # Time-based (MySQL, PostgreSQL, MSSQL variants)
@@ -83,7 +98,12 @@ class SQLiCheck(BaseCheck):
                             location=f"{page.url} (param: {param})",
                             evidence=f"Delayed response ({elapsed:.2f}s)",
                             risk="Could allow database access or data theft.",
-                            category="SQL Injection"
+                            category="SQL Injection",
+                            description="Injected time-delay function caused measurable response delay, indicating execution within SQL context.",
+                            recommendation="Use parameterized queries and limit database permissions. Implement query timeouts and monitoring.",
+                            references=SQLI_REFERENCES,
+                            parameter=param,
+                            payload=time_payload
                         ))
                         did_time = True
                         break
@@ -107,7 +127,12 @@ class SQLiCheck(BaseCheck):
                         location=f"Form {form.action} field {field.name}",
                         evidence="SQL error message detected",
                         risk="Could allow database access or data theft.",
-                        category="SQL Injection"
+                        category="SQL Injection",
+                        description="Database error indicates form field input is injected into SQL without parameterization.",
+                        recommendation="Refactor data access layer to use prepared statements for all queries.",
+                        references=SQLI_REFERENCES,
+                        parameter=field.name,
+                        payload="test'"
                     ))
                     continue
                 # Boolean-based
@@ -128,7 +153,12 @@ class SQLiCheck(BaseCheck):
                             location=f"Form {form.action} field {field.name}",
                             evidence="Response length differs for boolean conditions",
                             risk="Could allow database access or data theft.",
-                            category="SQL Injection"
+                            category="SQL Injection",
+                            description="Form field influences SQL logic flow based on injected boolean expression.",
+                            recommendation="Use parameter binding and ORM features to abstract query construction.",
+                            references=SQLI_REFERENCES,
+                            parameter=field.name,
+                            payload="test AND 1=1 | test AND 1=2"
                         ))
                         continue
                 # Time-based
@@ -152,7 +182,12 @@ class SQLiCheck(BaseCheck):
                             location=f"Form {form.action} field {field.name}",
                             evidence=f"Delayed response ({elapsed:.2f}s)",
                             risk="Could allow database access or data theft.",
-                            category="SQL Injection"
+                            category="SQL Injection",
+                            description="Injected time-based function executed by the database engine, causing delay.",
+                            recommendation="Apply least privilege to DB accounts, parameterize, and monitor for anomalous slow queries.",
+                            references=SQLI_REFERENCES,
+                            parameter=field.name,
+                            payload=tp
                         ))
                         time_hit = True
                         break

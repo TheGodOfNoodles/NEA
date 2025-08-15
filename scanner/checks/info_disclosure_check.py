@@ -31,11 +31,16 @@ class InfoDisclosureCheck(BaseCheck):
                 snippet = body[max(0, m.start()-20): m.end()+20]
                 findings.append(Finding(
                     issue=f"Potential {label}",
-                    severity="Medium" if 'KEY' in label else "Low",
+                    severity="Medium" if 'KEY' in label or 'Private' in label else "Low",
                     location=page.url,
                     evidence=snippet.replace('\n', ' ')[:120],
                     risk="Could expose sensitive data aiding attackers.",
-                    category="Information Disclosure"
+                    category="Information Disclosure",
+                    description="Sensitive-looking token or secret-like pattern found directly in page content which may indicate leakage of credentials or internal info.",
+                    recommendation="Remove secrets from client-delivered content. Rotate exposed keys and store secrets server-side or in secure vaults.",
+                    references=[
+                        "https://owasp.org/www-community/vulnerabilities/Information_exposure",
+                        "https://cheatsheetseries.owasp.org/cheatsheets/Secrets_Management_Cheat_Sheet.html"
+                    ]
                 ))
         return findings
-
