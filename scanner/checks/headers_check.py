@@ -16,13 +16,17 @@ class HeaderCheck(BaseCheck):
         headers = page.headers
         if not headers:
             return findings
+
+        def ev(val):
+            return "(missing)" if val is None else f"Value: {val}"
+
         xcto = headers.get('x-content-type-options')
         if xcto is None or xcto.lower() != 'nosniff':
             findings.append(Finding(
                 issue="Missing or Misconfigured X-Content-Type-Options",
                 severity="Low",
                 location=page.url,
-                evidence=str(xcto),
+                evidence=ev(xcto),
                 risk="Browsers may perform MIME sniffing leading to unexpected content execution.",
                 category="Security Headers",
                 description="Response lacks a proper X-Content-Type-Options: nosniff header, allowing browsers to guess MIME types.",
@@ -35,7 +39,7 @@ class HeaderCheck(BaseCheck):
                 issue="Missing or Weak X-Frame-Options",
                 severity="Medium",
                 location=page.url,
-                evidence=str(xfo),
+                evidence=ev(xfo),
                 risk="Could allow clickjacking attacks.",
                 category="Security Headers",
                 description="Response does not set X-Frame-Options or uses an unsafe value, enabling framing by attacker sites.",
@@ -48,7 +52,7 @@ class HeaderCheck(BaseCheck):
                 issue="Missing Content-Security-Policy",
                 severity="Low",
                 location=page.url,
-                evidence=str(csp),
+                evidence=ev(csp),
                 risk="Lack of CSP increases risk of XSS and data injection.",
                 category="Security Headers",
                 description="No Content-Security-Policy header present to restrict script, style, or resource sources.",
@@ -61,7 +65,7 @@ class HeaderCheck(BaseCheck):
                 issue="Missing Strict-Transport-Security",
                 severity="Medium",
                 location=page.url,
-                evidence=str(hsts),
+                evidence=ev(hsts),
                 risk="Without HSTS users could be downgraded to HTTP (MITM risk).",
                 category="Security Headers",
                 description="HTTPS site does not enforce HSTS, allowing protocol downgrade or cookie stripping.",
@@ -74,7 +78,7 @@ class HeaderCheck(BaseCheck):
                 issue="Missing Referrer-Policy",
                 severity="Low",
                 location=page.url,
-                evidence=str(refpol),
+                evidence=ev(refpol),
                 risk="Referrers may leak sensitive path/query data to third-party sites.",
                 category="Security Headers",
                 description="No Referrer-Policy set; full URLs may be leaked in Referer headers to external origins.",
@@ -87,7 +91,7 @@ class HeaderCheck(BaseCheck):
                 issue="Missing Permissions-Policy",
                 severity="Low",
                 location=page.url,
-                evidence=str(perm_pol),
+                evidence=ev(perm_pol),
                 risk="Browser features not restricted (e.g., camera, geolocation).",
                 category="Security Headers",
                 description="No Permissions-Policy header to limit powerful browser features to trusted origins.",
