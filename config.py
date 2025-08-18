@@ -18,6 +18,15 @@ class Config:
     CRAWL_DELAY: float = 0.0  # politeness delay seconds between requests
     INCLUDE_RE: str = ""
     EXCLUDE_RE: str = ""
+    CRAWL_CONCURRENCY: int = 1
+    SCAN_CONCURRENCY: int = 1
+    MAX_BODY_SIZE: Optional[int] = None  # if set, truncate stored body to this many bytes
+    PROGRESS_INTERVAL: float = 0.5  # minimum seconds between progress callback emissions
+    SKIP_ASSETS: bool = False       # skip collecting img/script/link assets
+    SKIP_JS_ENDPOINTS: bool = False # skip inline JS endpoint extraction
+    PIPELINE_SCAN: bool = False     # enable crawl+scan pipelining when scanner provided
+    FAST_XSS: bool = False          # limit XSS payloads for speed if enabled
+    XSS_MAX_PARALLEL: int = 1       # per-page parallel XSS payload attempts
 
     def apply_overrides(self):
         # Environment variable overrides
@@ -25,6 +34,26 @@ class Config:
         self.CRAWL_DELAY = float(os.getenv("SCANNER_CRAWL_DELAY", self.CRAWL_DELAY))
         self.INCLUDE_RE = os.getenv('SCANNER_INCLUDE_RE', self.INCLUDE_RE)
         self.EXCLUDE_RE = os.getenv('SCANNER_EXCLUDE_RE', self.EXCLUDE_RE)
+        self.CRAWL_CONCURRENCY = int(os.getenv('SCANNER_CRAWL_CONCURRENCY', self.CRAWL_CONCURRENCY))
+        self.SCAN_CONCURRENCY = int(os.getenv('SCANNER_SCAN_CONCURRENCY', self.SCAN_CONCURRENCY))
+        max_body_env = os.getenv('SCANNER_MAX_BODY_SIZE')
+        if max_body_env is not None:
+            try:
+                self.MAX_BODY_SIZE = int(max_body_env) if max_body_env.strip() else None
+            except ValueError:
+                pass
+        # progress interval override
+        prog_env = os.getenv('SCANNER_PROGRESS_INTERVAL')
+        if prog_env:
+            try:
+                self.PROGRESS_INTERVAL = max(0.05, float(prog_env))
+            except ValueError:
+                pass
+        # performance feature toggles
+        self.SKIP_ASSETS = os.getenv('SCANNER_SKIP_ASSETS','0') in ('1','true','True')
+        self.SKIP_JS_ENDPOINTS = os.getenv('SCANNER_SKIP_JS_ENDPOINTS','0') in ('1','true','True')
+        self.PIPELINE_SCAN = os.getenv('SCANNER_PIPELINE_SCAN','0') in ('1','true','True')
+        self.FAST_XSS = os.getenv('SCANNER_FAST_XSS','0') in ('1','true','True')
         ua_suffix = os.getenv("SCANNER_UA_SUFFIX", "")
         if not self.USER_AGENT:
             self.USER_AGENT = f"{self.APP_NAME}/{self.VERSION} (Educational Scanner){' '+ua_suffix if ua_suffix else ''}".strip()
@@ -34,6 +63,7 @@ class Config:
                 p = p.strip()
                 if p and p not in self.XSS_PAYLOADS:
                     self.XSS_PAYLOADS.append(p)
+        self.XSS_MAX_PARALLEL = int(os.getenv('SCANNER_XSS_MAX_PARALLEL', self.XSS_MAX_PARALLEL))
 
     def apply_user_settings(self, data: Dict[str, Any]):
         # only apply recognized keys to avoid accidental override of complex structures
@@ -82,5 +112,10 @@ CONFIG = _default_config()
 
 def reload_config():
     global CONFIG
-    CONFIG = _default_config()
+    new_cfg = _default_config()
+    # Mutate existing object so imported references remain valid
+    if CONFIG is not None:
+        CONFIG.__dict__.update(new_cfg.__dict__)
+        return CONFIG
+    CONFIG = new_cfg
     return CONFIG

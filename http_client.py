@@ -4,11 +4,21 @@ from typing import Optional, Tuple, Dict, Any
 from requests import Response
 from requests.exceptions import Timeout, ConnectionError, RequestException
 from config import CONFIG
+from requests.adapters import HTTPAdapter
 
 class HTTPClient:
-    def __init__(self, session: Optional[requests.Session] = None):
+    def __init__(self, session: Optional[requests.Session] = None, pool_size: int = 20):
         self.session = session or requests.Session()
-        self.session.headers.update({"User-Agent": CONFIG.USER_AGENT})
+        # Mount adapters for connection pooling / reuse if session supports it (tests use DummySession without mount())
+        if hasattr(self.session, 'mount'):
+            adapter = HTTPAdapter(pool_connections=pool_size, pool_maxsize=pool_size, max_retries=0)
+            try:
+                self.session.mount('http://', adapter)
+                self.session.mount('https://', adapter)
+            except Exception:
+                pass
+        if hasattr(self.session, 'headers'):
+            self.session.headers.update({"User-Agent": CONFIG.USER_AGENT})
         self.request_count = 0
         self.total_time = 0.0
         self.error_count = 0
